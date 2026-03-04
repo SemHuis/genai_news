@@ -25,6 +25,53 @@ def clean_text(text):
     # Convert multiple spaces/newlines into clean structure
     return text.strip()
 
+
+def parse_date(raw_text):
+    """Parse a date string (often Dutch) and return it as DD/MM/YYYY.
+
+    Examples handled:
+      - '26 augustus 2024 maandag' -> '26/08/2024'
+      - 'maandag 26 augustus 2024' -> '26/08/2024'
+      - '26/08/2024' or '26-08-2024' -> normalized to '26/08/2024'
+    If parsing fails, returns the cleaned input unchanged.
+    """
+    if not raw_text:
+        return "Unknown Date"
+    s = clean_text(raw_text)
+
+    # Remove common weekday names (Dutch)
+    s = re.sub(r"\b(maandag|dinsdag|woensdag|donderdag|vrijdag|zaterdag|zondag)\b", "", s, flags=re.I)
+
+    # Map Dutch month names to month numbers
+    months = {
+        'januari':1, 'februari':2, 'maart':3, 'april':4, 'mei':5, 'juni':6,
+        'juli':7, 'augustus':8, 'september':9, 'oktober':10, 'november':11, 'december':12
+    }
+
+    # Try patterns like '26 augustus 2024'
+    m = re.search(r"(?P<day>\d{1,2})\s+(?P<month>[A-Za-z]+)\s+(?P<year>\d{4})", s, flags=re.I)
+    if m:
+        day = int(m.group('day'))
+        month_word = m.group('month').lower()
+        year = m.group('year')
+        month = months.get(month_word)
+        if month:
+            return f"{day:02d}/{month:02d}/{year}"
+
+    # Try numeric formats like 26/08/2024 or 26-08-2024 or 26.08.2024
+    m2 = re.search(r"(?P<day>\d{1,2})[\/\-\.](?P<month>\d{1,2})[\/\-\.](?P<year>\d{2,4})", s)
+    if m2:
+        day = int(m2.group('day'))
+        month = int(m2.group('month'))
+        year = m2.group('year')
+        if len(year) == 2:
+            # assume 2000s for two-digit years (adjust if needed)
+            year = '20' + year
+        return f"{day:02d}/{month:02d}/{year}"
+
+    # Try pattern '26 augustus' with implicit year (rare) -> leave as-is
+    return s
+
 def parse_nrc_batch(raw_text):
     """Parses raw text using multiple possible separators."""
     # Split by common separators (case-insensitive)
@@ -33,25 +80,43 @@ def parse_nrc_batch(raw_text):
     
     extracted = []
     for art in articles:
-        if "NRC" not in art or "VOLLEDIGE TEKST" not in art:
+        # require at least the NRC marker (case-insensitive)
+        if not re.search(r"\bNRC\b", art, flags=re.I):
             continue
-            
+
         # 1. Title: Look for text followed by NRC
         # We look for the title at the start of the block or after empty lines
-        title_match = re.search(r'(?:^|\n)\s*(\d+\.\s*)?([^\n]+)\n\s*NRC', art, re.DOTALL)
+        title_match = re.search(r'(?:^|\n)\s*(\d+\.\s*)?([^\n]+)\n\s*NRC', art, re.DOTALL | re.IGNORECASE)
         title = clean_text(title_match.group(2)) if title_match else "Unknown Title"
 
-        # 2. Date: The line immediately following NRC
-        date_match = re.search(r'NRC\s*\n\s*([^\n]+)', art)
-        date = clean_text(date_match.group(1)) if date_match else "Unknown Date"
+        # 2. Date: The line immediately following NRC (case-insensitive)
+        date_match = re.search(r'NRC\s*\n\s*([^\n]+)', art, flags=re.I)
+        if date_match:
+            date = parse_date(date_match.group(1))
+        else:
+            # fallback: look for a date-like pattern anywhere in the article
+            date_guess = re.search(r"\d{1,2}\s+[A-Za-z]+\s+\d{4}", art, flags=re.I)
+            if date_guess:
+                date = parse_date(date_guess.group(0))
+            else:
+                date = "Unknown Date"
 
-        # 3. Author: Byline or footer
-        author_match = re.search(r'Byline:\s*([^\n]+)', art)
+        # 3. Author: Byline or footer (case-insensitive)
+        author_match = re.search(r'Byline:\s*([^\n]+)', art, flags=re.I)
         author = clean_text(author_match.group(1)) if author_match else "Redactie"
 
-        # 4. Body: Everything between VOLLEDIGE TEKST and footers
+        # 4. Body: Prefer VOLLEDIGE TEKST marker, but fall back to everything
+        # after the NRC/date line if the marker is missing
         body_match = re.search(r'VOLLEDIGE TEKST:(.*?)(?=Link naar PDF|Graphic|Load-Date|$)', art, re.DOTALL | re.IGNORECASE)
-        body = clean_text(body_match.group(1)) if body_match else ""
+        if body_match:
+            body = clean_text(body_match.group(1))
+        else:
+            # find position after the NRC + optional date line
+            m_nrc_line = re.search(r'NRC\s*\n\s*[^\n]+', art, flags=re.I)
+            start_pos = m_nrc_line.end() if m_nrc_line else 0
+            remainder = art[start_pos:]
+            # strip common footers
+            body = clean_text(re.split(r'(?i)Link naar PDF|Graphic|Load-Date', remainder)[0])
 
         if body:
             extracted.append({
