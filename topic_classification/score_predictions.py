@@ -48,27 +48,27 @@ def map_subtopics_to_head_topics_weighted(subtopics, mapping):
         return []
 
     # Get the topic with the highest score
-    # Because we use floating point weights, ties are much rarer.
     best_topic = max(head_topic_scores, key=head_topic_scores.get)
     return [best_topic]
 
-def process_csv(input_file, output_file, mapping_file):
+def process_csv_for_subtopics(input_file, output_file, mapping_file):
     """Reads input CSV and writes results to a new CSV."""
     mapping = load_mapping(mapping_file)
     
     results = []
     with open(input_file, mode='r', encoding='utf-8') as infile:
         reader = csv.DictReader(infile)
-        fieldnames = reader.fieldnames + ['mapped_head_topic']
+        fieldnames = reader.fieldnames + ['predicted_head_topic']
         
         for row in reader:
             try:
                 # ast.literal_eval handles strings like "['sub1', 'sub2']"
+                
                 subtopics = ast.literal_eval(row['predicted_subtopics'])
                 mapped = map_subtopics_to_head_topics_weighted(subtopics, mapping)
-                row['mapped_head_topic'] = str(mapped)
+                row['predicted_head_topic'] = str(mapped)
             except Exception as e:
-                row['mapped_head_topic'] = f"Error: {e}"
+                row['predicted_head_topic'] = f"Error: {e}"
             results.append(row)
             
     with open(output_file, mode='w', encoding='utf-8', newline='') as outfile:
@@ -78,13 +78,15 @@ def process_csv(input_file, output_file, mapping_file):
 
 def main():
     parser = argparse.ArgumentParser(description="Score predicted topics against annotated topics.")
-    parser.add_argument('-i', '--input', default='89_qwen_test.csv', help='Input CSV file with predicted (sub)topics (default: 89_qwen_test.csv)')
-    parser.add_argument('-o', '--output', default='results.csv', help='Output CSV file for results (default: results.csv)')
+    parser.add_argument('-i', '--input', default='input/89_qwen_test.csv', help='Input CSV file with predicted (sub)topics (default: 89_qwen_test.csv)')
+    parser.add_argument('-o', '--output', default='subtopics_results.csv', help='Output CSV file for results (default: results.csv)')
     parser.add_argument('-m', '--mapping', default='iptc_map.json', help='IPTC mapping JSON file (default: iptc_map.json)')
+    parser.add_argument('-sub', '--subtopic', action='store_true', help='Activate if prediction file has subtopics (default: False)')
     args = parser.parse_args()
     
-    process_csv(args.input, args.output, args.mapping)
-    print(f"Processing complete. Results saved to {args.output}")
+    if args.subtopic:
+        process_csv_for_subtopics(args.input, args.output, args.mapping)
+        print(f"Processing complete. Mapped subtopics saved to {args.output}")
 
 
 if __name__ == "__main__":
