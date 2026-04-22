@@ -1,6 +1,28 @@
 from docx import Document
 import os
 import sys
+import re
+
+def normalize_text(text):
+    """Normalize unusual line separators and multiple newlines.
+    """
+    if not text:
+        return ""
+    
+    # Replace Unicode line/paragraph separators with standard newlines
+    text = re.sub(r'[\u2028\u2029\u0085]', '\n', text)
+    # Replace carriage returns + newline with just newline
+    text = re.sub(r'\r\n', '\n', text)
+    # Replace lone carriage returns with newlines
+    text = re.sub(r'\r', '\n', text)
+    # Replace 3+ consecutive newlines with exactly 2 (preserve paragraph breaks)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    # Strip trailing/leading whitespace from each line but preserve structure
+    lines = text.split('\n')
+    lines = [line.rstrip() for line in lines]
+    text = '\n'.join(lines)
+    
+    return text.strip()
 
 def get_docx_text(path):
     """Extracts text from paragraphs AND tables to ensure nothing is missed."""
@@ -8,14 +30,18 @@ def get_docx_text(path):
     content = []
     # Extract from paragraphs
     for para in doc.paragraphs:
-        content.append(para.text)
+        normalized = normalize_text(para.text)
+        if normalized:  # only add non-empty paragraphs
+            content.append(normalized)
     # Extract from tables
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
-                # Add newline to keep structure
-                content.append(cell.text + "\n")
-    return "\n".join(content)
+                normalized = normalize_text(cell.text)
+                if normalized:
+                    content.append(normalized)
+    # Join paragraphs with double newlines for readability
+    return "\n\n".join(content)
 
 def main():
     # Get articles from multiple docx files in a directory
