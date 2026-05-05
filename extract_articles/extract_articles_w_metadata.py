@@ -2,14 +2,126 @@ import os
 import re
 import json
 import argparse
+import spacy
 
+
+import spacy
+import re
+
+# Load with disabled components for speed
+try:
+    nlp = spacy.load("nl_core_news_sm", disable=["parser", "lemmatizer", "attribute_ruler"])
+except OSError:
+    nlp = None
+
+
+def extract_leading_location_or_metadata(text):
+    if not text or not nlp:
+        return text
+
+    placenames = {
+    'groningen', 'leeuwarden', 'assen', 'den haag', 'amsterdam', 
+    'rotterdam', 'utrecht', 'saitama', 'wildervank', 'haren', 'zuidlaren',
+    'eemsdelta', 'drachten', 'sneek', 'heerenveen', 'steenwijk', 'oldemarkt',
+    'wilhelminaoord', 'steenwijkerland', 'wanneperveen', 'steenwijkerwold', 
+    'vollenhove', 'blokzijl', 'scheerwolde', 'giethoorn', 'meppel', 'zwolle',
+    'kampen', 'dronten', 'lelystad', 'almere', 'emmen', 'hoogeveen', 'coevorden',
+    'veenendaal', 'arnhem', 'nijmegen', 'eindhoven', 'tilburg', 'den bosch',
+    'maastricht', 'venlo', 'roermond', 'sittard', 'wildervank', 'haren/zuidlaren',
+    'haren', 'zuidlaren', 'jeruzalem', 'parijs', 'londen', 'berlijn', 'moskou', 'new york', 'washington', 'tokio',
+    'brussel', 'antwerpen', 'gent', 'leuven', 'brugge', 'luik', 'namur', 'charleroi',
+    'westerlee', 'veendam', 'stadsgewest', 'groningen/assendelft', 'groningen/leeuwarden', 'groningen/den haag'
+    }       
+
+    # 1. CLEAN METADATA REGEX
+    # Removed 'VAN' to prevent breaking sentences like "Van kwade opzet..."
+    meta_pattern = re.match(r'^\s*(?:TEKST|DOOR|REDACTIE)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)[\s\n:]*', text, re.I)
+    if meta_pattern and len(meta_pattern.group(0)) < 60:
+        text = text[meta_pattern.end():].lstrip()
+
+    # 2. HARDCODED PLACENAME FALLBACK (Fastest Path)
+    # Check if the text starts with a city from our list followed by a separator
+    # This handles "Groningen - ", "assen:", etc.
+    first_word_match = re.match(r'^([a-z/]+)(?:\s*[:\-\s—/]+\s*)', text, re.I)
+    if first_word_match:
+        found_city = first_word_match.group(1).lower()
+        # Handle slash cases like haren/zuidlaren
+        parts = found_city.split('/')
+        if any(p in placenames for p in parts):
+            after_city = text[first_word_match.end():].lstrip()
+            # Quick POS check to ensure it's not a subject
+            check_doc = nlp(after_city[:30])
+            if not (check_doc and len(check_doc) > 0 and check_doc[0].pos_ in ("VERB", "AUX")):
+                return after_city
+
+    # 3. THE NORMALIZATION TRICK (NER)
+    sample = text[:100]
+    # We replace '/' with ' / ' for better NER detection of "haren/Zuidlaren"
+    doc_norm = nlp(sample.replace('/', ' / ').title())
+    doc_orig = nlp(sample)
+
+    if doc_norm.ents:
+        first_ent = doc_norm.ents[0]
+        if first_ent.start == 0 and first_ent.label_ in ("GPE", "LOC"):
+            # Find end point in original text
+            char_end = first_ent.end_char
+            token_after = None
+            for token in doc_orig:
+                if token.idx >= char_end:
+                    token_after = token
+                    break
+            
+            # Subject protection: If followed by a verb, keep it
+            if not token_after or token_after.pos_ not in ("VERB", "AUX"):
+                remaining = text[char_end:].lstrip()
+                return re.sub(r'^[:\-\s—/]+', '', remaining)
+
+    # 4. BRUTE FORCE FALLBACK (Regex for All-Caps Headers)
+    caps_match = re.match(r'^([A-Z]{2,}(?:\s*/\s*[A-Z]{2,})?)(?:\s*[:\-\s—]+\s*|\s+)', text)
+    if caps_match:
+        after_caps = text[caps_match.end():].lstrip()
+        check_doc = nlp(after_caps[:30])
+        if check_doc and len(check_doc) > 0 and check_doc[0].pos_ in ("VERB", "AUX"):
+            return text # It's a subject
+        return after_caps
+
+    return text
 
 def clean_text(text):
-    """Removes tags and standardizes whitespace."""
+    """Cleans text by removing backslashes, trimming whitespace, and removing common metadata patterns."""
     if not text:
         return ""
+    # Remove backslashes and trim whitespace
     text = re.sub(r'\\', '', text)
-    return text.strip()
+    text = text.strip()
+
+    # Remove '(nrc)' from end of text if present
+    text = re.sub(r'\s*\(nrc\)\s*$', '', text, flags=re.I)
+
+    # Remove "Bekijk de oorspronkelijke pagina: pagina X" footer (AD)
+    text = re.sub(r'\n\nBekijk de oorspronkelijke pagina:\s*pagina\s+[\d,\s]+(?:\s*pagina)?.*?$', '', text, flags=re.I)
+
+    # Remove trailing author name (e.g., "\nFirstname Lastname" at end)
+    text = re.sub(r'\n[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s*$', '', text)
+
+    # Remove leading location or metadata using NER
+    text = extract_leading_location_or_metadata(text)
+
+    # Remove preamble before first double newline if it looks like metadata
+    # (e.g., "Door onze redacteur", etc.)
+    # But preserve if the text after \n\n starts with a quote mark (" or ,,)
+    parts = text.split('\n\n', 1)
+    if len(parts) == 2:
+        before, after = parts
+        after_stripped = after.lstrip()
+        # Only remove preamble if after doesn't start with quote and before looks like metadata
+        if not after_stripped.startswith(('"', ',,')):
+            # Check if 'before' looks like metadata (short, likely author/attribution lines)
+            before_lines = [l.strip() for l in before.split('\n') if l.strip()]
+            if before_lines and all(len(l) < 100 for l in before_lines):
+                text = after
+                
+    return text
 
 
 def clean_section(s):
@@ -224,8 +336,8 @@ def parse_newspaper_batch(raw_text):
             match = re.search(r"^(.*?)\nLink naar PDF", art, re.MULTILINE)
             if match:
                 potential_name = match.group(1).strip()
-            if is_valid_name(potential_name):
-                author = clean_text(potential_name)
+                if is_valid_name(potential_name):
+                    author = clean_text(potential_name)
         
         # Normalize author name: capitalize each word properly
         if author != "Unknown Author":
