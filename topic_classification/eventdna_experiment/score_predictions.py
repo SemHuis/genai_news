@@ -164,7 +164,7 @@ def confusion_matrix_all_topics(predicted_file, normalize=False, none_label="<NO
     cm_df = pd.DataFrame(cm, index=labels, columns=labels)
 
     if normalize:
-        # normalize by true-label row sums to get per-class recall-like proportions
+        # Normalize by true-label row sums to get per-class recall-like proportions
         with pd.option_context('mode.use_inf_as_na', True):
             row_sums = cm_df.sum(axis=1).replace(0, 1)
             cm_df = cm_df.div(row_sums, axis=0)
@@ -174,7 +174,6 @@ def confusion_matrix_all_topics(predicted_file, normalize=False, none_label="<NO
 
 def plot_confusion_matrix(cm_df, out_path=None, figsize=(12, 10), cmap='Blues', annot=True):
     """Plot and save a confusion matrix DataFrame as a heatmap PNG.
-
     If seaborn is available it will be used for a nicer plot; otherwise matplotlib.imshow is used.
     """
     plt.figure(figsize=figsize)
