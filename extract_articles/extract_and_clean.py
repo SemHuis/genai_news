@@ -2,7 +2,9 @@ import re
 import json
 import os
 import argparse
+import spacy
 
+nlp = spacy.load("nl_core_news_lg")
 
 def clean_author(raw_author):
     if not raw_author:
@@ -120,11 +122,50 @@ def format_date(raw_date):
         return f"{day.zfill(2)}/{month_num}/{year}"
     return raw_date
 
+def remove_gpe_entities(text):
+    """Removes GPE entities from text using spaCy if they act as a dateline header."""
+    words = text.split()
+    if not words:
+        return text
+        
+    # Clean only the first word, leave the second word exactly as-is
+    preview_words = words[:2]
+    preview_words[0] = preview_words[0].capitalize()
+    text_preview = " ".join(preview_words)
+    
+    doc = nlp(text_preview)
+    start_text_entities = [(ent.text, ent.label_) for ent in doc.ents]
+    
+    # Find if a GPE exists in the preview
+    gpe_entity = next((text for text, label in start_text_entities if label == "GPE"), None)
+    
+    if gpe_entity:
+        # Use case-insensitive matching (.lower()) against the original text
+        if text.lower().startswith(gpe_entity.lower()):
+            # Slice out the length of the GPE from the original text string
+            after_gpe = text[len(gpe_entity):].strip()
+            # If the remaining text starts with an Uppercase letter
+            if after_gpe and after_gpe[0].isupper():
+                return after_gpe
+    return text
 
-def clean_text_block(text):
+
+def clean_text_block(text, is_full_text=False):
     """General text cleanup (removing extra whitespace, etc.)"""
     if not text:
-        return ""
+        return ("", "") if is_full_text else ""
+
+    # Make text a raw string to avoid escape character issues
+    text = repr(text)[1:-1]
+    
+    # Add all text before to the highlight and remove it from the full_text
+    highlight = ""
+    if is_full_text:
+        text_preview = " ".join(text.split()[:40])
+        if "\\n\\n" in text_preview:
+            parts = text.split("\\n\\n", 1)
+            text = parts[1].strip()
+            highlight = parts[0].strip()
 
     # Remove any "Bekijk de oorspronkelijke pagina:" and everything after it
     marker = "Bekijk de oorspronkelijke pagina:"
@@ -133,7 +174,50 @@ def clean_text_block(text):
 
     # Remove "Link naar PDF" if it appears anywhere in the text
     text = text.replace("Link naar PDF", "")
+    text = text.replace("\\n\\nPDF-bestand van dit document\\n\\n", "")
+    text = text.replace("PDF-bestand van dit document\\n\\n", "")
+    
+    # Remove leading dashes with spaces (e.g., "- Amsterdam" -> "Amsterdam")
+    text = re.sub(r'(?:^|\s)-\s+', ' ', text)
+    highlight = re.sub(r'(?:^|\s)-\s+', ' ', highlight)
+    
+    # Remove trailing dashes with spaces (e.g., "Amsterdam - " -> "Amsterdam")
+    text = re.sub(r'\s+-(?:\s|$)', ' ', text)
+    highlight = re.sub(r'\s+-(?:\s|$)', ' ', highlight)
 
+    # Collapse any leftover double spaces down to a single space
+    text = re.sub(r'\s+', ' ', text).strip()
+    highlight = re.sub(r'\s+', ' ', highlight).strip()
+
+    # Remove leading dashes with spaces (e.g., "- Amsterdam" -> "Amsterdam")
+    text = text.replace("- ", "")
+    highlight = highlight.replace("- ", "")
+    text = text.replace(" -", "")
+    highlight = highlight.replace(" -", "")
+
+    if text.split()[:1] == ["door"]:
+        # Remove "door" and rest of text before \n\n if it appears at the very start of the text (common in Telegraaf)
+        text = re.sub(r'^door\s+.*?\\n\\n', '', text, flags=re.IGNORECASE)
+
+    # If the highlight is more than 7% of the full text, we assume it's not a highlight but rather an introductory paragraph and we move it to the full text instead
+    # cannot divide by zero because if there is no text, there is also no highlight, so the condition will not be met and we will not move the highlight to the full text
+    if len(text) != 0:
+        if is_full_text and highlight and len(highlight) / len(text) > 0.07:
+            text = highlight + " " + text
+            highlight = "" 
+
+    # If in the first 20 words of the text there is a "•" we remove everything before and including the "•" 
+    if is_full_text:
+        text_preview = " ".join(text.split()[:20])
+        if "•" in text_preview:
+            text = text.split("•", 1)[1].strip()
+
+    text = remove_gpe_entities(text)
+    highlight = remove_gpe_entities(highlight)
+    
+    if is_full_text:
+        return text.strip(), highlight.strip()
+    
     return text.strip()
 
 
@@ -144,8 +228,8 @@ def clean_article(article_dict):
     """
     article_dict["author"] = clean_author(article_dict["author"])
     article_dict["date"] = format_date(article_dict["date"])
-    article_dict["full_text"] = clean_text_block(article_dict["full_text"])
-    article_dict["highlight"] = clean_text_block(article_dict["highlight"])
+    article_dict["full_text"], highlight = clean_text_block(article_dict["full_text"], is_full_text=True)
+    article_dict["highlight"] = clean_text_block(article_dict["highlight"] + " " + highlight)
     return article_dict
 
 
@@ -174,7 +258,7 @@ def parse_txt_to_list(input_file, source):
         body_match = re.search(r'Body\s+(.*?)(?=Load-Date:|$)', clean_chunk, re.DOTALL)
 
         raw_articles.append({
-            "title": lines[0],
+            "title": lines[0].split(";")[0].strip(),
             "source": source,
             "date": lines[2],
             "author": author_match.group(1) if author_match else "",
