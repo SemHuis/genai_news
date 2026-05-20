@@ -3,10 +3,12 @@ import json
 import os
 import argparse
 import spacy
+import random
 
 nlp = spacy.load("nl_core_news_lg")
 
 def clean_author(raw_author):
+    """Cleans the raw author string and returns a list of cleaned author names."""
     if not raw_author:
         return []
     
@@ -103,7 +105,7 @@ def clean_author(raw_author):
     unique_list = []
     for n in cleaned_list:
         if n not in unique_list:
-            unique_list.append(n)
+            unique_list.append(n.upper())
             
     return unique_list
 
@@ -127,11 +129,65 @@ def remove_gpe_entities(text):
     words = text.split()
     if not words:
         return text
+
+    if "entity_ruler" in nlp.pipe_names:
+        # Pak de bestaande component op
+        ruler = nlp.get_pipe("entity_ruler")
+    else:
+        # Alleen toevoegen als hij nog niet bestaat
+        ruler = nlp.add_pipe("entity_ruler", before="ner")
+
+    patterns = [
+    {"label": "GPE", "pattern": "Dhaka"},
+    {"label": "GPE", "pattern": "Zandvoort"},
+    {"label": "GPE", "pattern": "Apeldoorn"},
+    {"label": "GPE", "pattern": "Ter Apel"},
+    {"label": "GPE", "pattern": "Havelte"},
+    {"label": "GPE", "pattern": "Kuinre"},
+    {"label": "GPE", "pattern": "Sint Jansklooster"},
+    {"label": "GPE", "pattern": "Scheerwolde"},
+    {"label": "GPE", "pattern": "Steenwijk"},
+    {"label": "GPE", "pattern": "Steenwjkerwold"},
+    {"label": "GPE", "pattern": "Kalenberg"},
+    {"label": "GPE", "pattern": "Tuk"},
+    {"label": "GPE", "pattern": "Steenwijkerland"},
+    {"label": "GPE", "pattern": "Belt-Schutsloot"},
+    {"label": "GPE", "pattern": "Diever"},
+    {"label": "GPE", "pattern": "Staphorst"},
+    {"label": "GPE", "pattern": "Vledder"},
+    {"label": "GPE", "pattern": "Zuidwolde"},
+    {"label": "GPE", "pattern": "Willemsoord"},
+    {"label": "GPE", "pattern": "Basse"},
+    {"label": "GPE", "pattern": "Kallenkote"},
+    {"label": "GPE", "pattern": "Dwingeloo"},
+    {"label": "GPE", "pattern": "Feanwalden"},
+    {"label": "GPE", "pattern": "Kollum"},
+    {"label": "GPE", "pattern": "De Westereen"},
+    {"label": "GPE", "pattern": "Burdaard"},
+    {"label": "GPE", "pattern": "Ternaard"},
+    {"label": "GPE", "pattern": "Buitenpost"},
+    {"label": "GPE", "pattern": "Lauwersoog"},
+    {"label": "GPE", "pattern": "Reitsum"},
+    {"label": "GPE", "pattern": "Hantumhuzen"},
+    {"label": "GPE", "pattern": "Surhuisterveen"},
+    {"label": "GPE", "pattern": "Holwerd"},
+    {"label": "GPE", "pattern": "Driezum"},
+    {"label": "GPE", "pattern": "Paezens"},
+    {"label": "GPE", "pattern": "Westergeast"},
+    {"label": "GPE", "pattern": "Bartlehiem"},
+    {"label": "GPE", "pattern": "Warfstermolen"},
+    {"label": "GPE", "pattern": "Ingwierrum"},
+    {"label": "GPE", "pattern": "Stadskanaal"},
+    {"label": "GPE", "pattern": "Ingwierrum"}
+    ]
+
+    ruler.add_patterns(patterns)
         
     # Clean only the first word, leave the second word exactly as-is
-    preview_words = words[:2]
+    # Capitalize first letter of first words and lowercase the rest of first word
+    preview_words = words[:10]
     preview_words[0] = preview_words[0].capitalize()
-    text_preview = " ".join(preview_words)
+    text_preview = " ".join(preview_words)  
     
     doc = nlp(text_preview)
     start_text_entities = [(ent.text, ent.label_) for ent in doc.ents]
@@ -144,92 +200,321 @@ def remove_gpe_entities(text):
         if text.lower().startswith(gpe_entity.lower()):
             # Slice out the length of the GPE from the original text string
             after_gpe = text[len(gpe_entity):].strip()
+            # Remove all leading punctuation from after_gpe
+            after_gpe = re.sub(r'^\W+', '', after_gpe)
             # If the remaining text starts with an Uppercase letter
             if after_gpe and after_gpe[0].isupper():
                 return after_gpe
+    return text 
+
+
+def clean_cap_start(text: str) -> str:
+    if not text:
+        return text
+        
+    # Define our character sets (including Dutch/European diacritics)
+    UPPER = r'A-ZÄËÏÖÜÁÉÍÓÚÀÈÌÒÙ'
+    LOWER = r'a-zäëïöüáéíóúàèìòù'
+    
+    # Explicit separators (hyphens, dashes, colons)
+    # Catches: "AMSTERDAM -", "DEN HAAG (ANP):"
+    pattern_sep = re.compile(
+        r'^\s*'
+        r'(?:[' + UPPER + r']{2,}(?:[,\s/&\'-]+[' + UPPER + r'0-9]+)*)' 
+        r'(?:\s*\([A-Za-z0-9\s]+\))?' 
+        r'\s*[-—–:]\s+',
+        flags=re.UNICODE
+    )
+    
+    # Space-only separator
+    # Catches: "AMSTERDAM In Amsterdam", "TOUR DE FRANCE 2024 De start"
+    # The Lookahead at the end ensures the NEXT word starts with a Capital letter 
+    # followed by a lowercase letter OR a word boundary (for single-letter words like "U")
+    pattern_space = re.compile(
+        r'^\s*'
+        r'(?:[' + UPPER + r']{2,}(?:[,\s/&\'-]+[' + UPPER + r'0-9]+)*)'
+        r'(?:\s*\([A-Za-z0-9\s]+\))?'
+        r'\s+'
+        r'(?=[' + UPPER + r'](?:[' + LOWER + r']|\b))',
+        flags=re.UNICODE
+    )
+
+    # First try removing datelines with explicit punctuation
+    cleaned = pattern_sep.sub('', text)
+    
+    # If no punctuation was found, try the space-only heuristic
+    if cleaned == text:
+        cleaned = pattern_space.sub('', cleaned)
+        
+    return cleaned.strip()
+
+
+def normalize_quotes(text: str) -> str:
+    # Convert non-quote multi-character
+    text = text.replace(',,', '"')
+    
+    # Normalize all single and double smart quotes to ASCII ' and "
+    safe_mapping = str.maketrans({
+        '„': '"', '“': '"', '”': '"', '«': '"', '»': '"', '＂': '"',
+        '‘': "'", '’': "'", '‚': "'", '‛': "'"
+    })
+    text = text.translate(safe_mapping)
+    
+    # Double single quotes to "
+    text = text.replace("''", '"')
+    
+    # Convert double backticks ``
+    text = text.replace("``", '"')
+    
     return text
 
 
-def clean_text_block(text, is_full_text=False):
-    """General text cleanup (removing extra whitespace, etc.)"""
-    if not text:
-        return ("", "") if is_full_text else ""
+def clean_article_base(text):
+    """Cleans newspaper layout artifacts from text while preserving punctuation,vcase sensitivity, 
+    and function words essential for stylometry.
+    """
+    if not text or not isinstance(text, str):
+        return ""
 
-    # Make text a raw string to avoid escape character issues
-    text = repr(text)[1:-1]
-    
-    # Add all text before to the highlight and remove it from the full_text
-    highlight = ""
-    if is_full_text:
-        text_preview = " ".join(text.split()[:40])
-        if "\\n\\n" in text_preview:
-            parts = text.split("\\n\\n", 1)
-            text = parts[1].strip()
-            highlight = parts[0].strip()
+    # Remove "Bekijk de oorspronkelijke pagina:..."and everything after it
+    text = re.sub(
+        r"Bekijk de oorspronkelijke pagina:\s*pagina\s*\d+.*$",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
 
-    # Remove any "Bekijk de oorspronkelijke pagina:" and everything after it
-    marker = "Bekijk de oorspronkelijke pagina:"
-    if marker in text:
-        text = text.split(marker)[0]
-
-    # Remove "Link naar PDF" if it appears anywhere in the text
+    # Remove "Link naar PDF" or "PDF-bestand van dit document" if it appears anywhere in the text
     text = text.replace("Link naar PDF", "")
-    text = text.replace("\\n\\nPDF-bestand van dit document\\n\\n", "")
-    text = text.replace("PDF-bestand van dit document\\n\\n", "")
-    
+    text = text.replace("\n\nPDF-bestand van dit document\n\n", "")
+    text = text.replace("PDF-bestand van dit document\n\n", "")
+
+    # If the text hits uppercase genre markers on a fresh line, drop everything below.
+    review_footer_pattern = (
+        r"\n\n(FICTIE|NON-FICTIE|KLASSIEK|LITERATUUR|FILM)\n\n.*$"
+    )
+    text = re.sub(
+        review_footer_pattern, "", text, flags=re.IGNORECASE | re.DOTALL
+    )
+
+    # Tailored sub-check for short product info arrays at the very end of text
+    # e.g., 'Hannibal; 896 pagina's; € 79,95.'
+    text = re.sub(
+        r"\n\n[^\n]+;\s*\d+\s*pagina\'s;\s*€.*$", "", text, flags=re.MULTILINE
+    )
+
+    # 3. Strip Graphic / Image Captions explicitly if they appear mid-text
+    # Matches 'Graphic' followed by newlines and text up until the next double newline
+    text = re.sub(r"Graphic\n\n.*?(?=\n\n|$)", "", text, flags=re.IGNORECASE)
+
+    while True:
+        # Match a line from the start (^) that contains no newlines,
+        # is between 2 and 100 chars, does NOT end with [.!?], followed by \n\n
+        match = re.match(r"^([^\n]{2,100})(?<![.!?])\n\n", text)
+        if match:
+            # Remove the matched meta-header line and the newlines
+            text = text[match.end() :]
+        else:
+            # Stop the loop as soon as we hit the actual body text (which ends with a punctuation mark)
+            break
+
+    # Removes localized headers that act as list intros inside the text
+    # Matches '3x [title]'
+    text = re.sub(
+        r"\d+x\s+[^\n]+(?=\n\n)", "", text, flags=re.IGNORECASE
+    ) 
+    # Also remove localized headers that are just a couple of words long and do not end with proper sentence punctuation, which are likely to be section headers or injected captions
+    text = re.sub(r"\n\n([^\n]{2,45})(?<![.!?])\n\n", "\n\n", text)
+
+    # Removes end-of-text snippets 
+    text = re.sub(
+        r"\n\n[^\n]+\n\n[^\n]+\n\n(?:â˜…|â˜†|[★☆★☆\d/])+\n\n.*$",
+        "",
+        text,
+        flags=re.DOTALL,
+    )
+
+    # Cleans capitalized words from the start of the text
+    text = clean_cap_start(text)
+
+    # If the text starts with 'x/x' (e.g., "kollum/hallum") we remove that part
+    text = re.sub(
+    r"^[a-zA-ZÁÉÓÚÝŇáéóúýň]+/[a-zA-ZÁÉÓÚÝŇáéóúýň]+(?:\s*[-–—]\s*)?",
+    "", text, flags=re.IGNORECASE)
+
+    # Final whitespace normalization
+    # Collapse multiple consecutive newlines into exactly two, and trim outer edges
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = text.strip()
+
+    text = normalize_quotes(text)
+
+    return text
+
+
+def clean_article_tgf(text):
+    """Cleans the article text while preserving stylometric features, and also extracts a highlight if present."""
+
+    # First apply the base cleaning 
+    text = clean_article_base(text)
+
+    # Strip Tabloid Section & Sub-Brand Stamps at the top
+    # Matches common uppercase Telegraaf supplements (VROUW, VRIJ, STRIKTVRIJ, etc.) 
+    # up to 35 characters long, followed by double newlines.
+    brand_pattern = r"^(VROUW|VRIJ|STRIKTVRIJ|GLAMOUR|REIZEN|CULTUUR|SPORT|GELD)(?:\s+[A-Z\s]+)?\n\n"
+    text = re.sub(brand_pattern, "", text, flags=re.IGNORECASE)
+
+    # Strip Chronological Timeline Block Prefixes
+    # Matches strings like "JAN/FEB/MRT." or "APR/MEI/JUN." at the start of a paragraph
+    # including variations with up to 4 month groupings (e.g. JUL/AUG/SEP/OCT)
+    timeline_pattern = r"(?:^[A-Z]{3}(?:/[A-Z]{3}){1,3}\.?\s+|\n\n[A-Z]{3}(?:/[A-Z]{3}){1,3}\.?\s+)"
+    text = re.sub(timeline_pattern, "\n\n", text)
+
+    # Strip CMS App/Video Marketing Calls-to-Action
+    # Deletes standard boilerplate instructions regarding downloading the app or watching media
+    text = re.sub(r"of\s+download\s+de\s+gratis\s+Telegraaf-app\s+voor\s+het\s+laatste\s+nieuws\.?", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"Bekijk\s+de\s+video\s+(?:bovenaan|onderaan)\s+deze\s+pagina\.?", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"Luister\s+hier\s+naar\s+de\s+podcast\.?", "", text, flags=re.IGNORECASE)
+
+    # Removes introduction of author -> door Sharon Story
+    text = re.sub(r'\bdoor\s+\w+\s+\w+', '', text, flags=re.IGNORECASE)
+
+    # Normalize Tabloid Quote Introductions
+    # Tabloid text often drops traditional punctuation for script-like colons 
+    # e.g., 'Omtzigt snikt: „...' -> replaces the colon with a comma to stabilize standard syntax
+    text = re.sub(r"(\w+)\s*:\s*(?=[„'\"\'“])", r"\1, ", text)
+
     # Remove leading dashes with spaces (e.g., "- Amsterdam" -> "Amsterdam")
-    text = re.sub(r'(?:^|\s)-\s+', ' ', text)
-    highlight = re.sub(r'(?:^|\s)-\s+', ' ', highlight)
-    
+    text = re.sub(r"^[ \t]*[-–—][-–— \t]*(?=\w)", "", text, flags=re.MULTILINE)
     # Remove trailing dashes with spaces (e.g., "Amsterdam - " -> "Amsterdam")
     text = re.sub(r'\s+-(?:\s|$)', ' ', text)
-    highlight = re.sub(r'\s+-(?:\s|$)', ' ', highlight)
-
     # Collapse any leftover double spaces down to a single space
     text = re.sub(r'\s+', ' ', text).strip()
-    highlight = re.sub(r'\s+', ' ', highlight).strip()
 
-    # Remove leading dashes with spaces (e.g., "- Amsterdam" -> "Amsterdam")
-    text = text.replace("- ", "")
-    highlight = highlight.replace("- ", "")
-    text = text.replace(" -", "")
-    highlight = highlight.replace(" -", "")
-
-    if text.split()[:1] == ["door"]:
-        # Remove "door" and rest of text before \n\n if it appears at the very start of the text (common in Telegraaf)
-        text = re.sub(r'^door\s+.*?\\n\\n', '', text, flags=re.IGNORECASE)
-
-    # If the highlight is more than 7% of the full text, we assume it's not a highlight but rather an introductory paragraph and we move it to the full text instead
-    # cannot divide by zero because if there is no text, there is also no highlight, so the condition will not be met and we will not move the highlight to the full text
-    if len(text) != 0:
-        if is_full_text and highlight and len(highlight) / len(text) > 0.07:
-            text = highlight + " " + text
-            highlight = "" 
-
-    # If in the first 20 words of the text there is a "•" we remove everything before and including the "•" 
-    if is_full_text:
-        text_preview = " ".join(text.split()[:20])
-        if "•" in text_preview:
-            text = text.split("•", 1)[1].strip()
-
+    # Remove GPE entities if they appear in the first two words of the text
     text = remove_gpe_entities(text)
-    highlight = remove_gpe_entities(highlight)
-    
-    if is_full_text:
-        return text.strip(), highlight.strip()
-    
+
+    # Re-normalize final layout padding strings
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
-def clean_article(article_dict):
-    """
-    The orchestrator for cleaning. 
-    Pass a raw dictionary here and it returns a polished one.
-    """
+def clean_article_ed(text, author_list=None):
+    """Cleans the article text while preserving stylometric features, and also extracts a highlight if present."""
+    if not text or not isinstance(text, str):
+        return "", ""
+
+    # First apply the base cleaning 
+    text = clean_article_base(text)
+
+    # Strip Hyperlocal Dateline Preambles at the absolute start
+    # Matches uppercase city names at the very beginning (e.g., "EINDHOVEN - " or "VALKENSWAARD, 12.00 uur - ")
+    # Up to 30 characters long, ending with a space-hyphen-space or space-comma-space sequence.
+    text = re.sub(r"^[A-ZÁÉÓÚÝŇ\s]{3,30}\s*[,-]\s*(?:\d{2}\.\d{2}\s*uur\s*-\s*)?", "", text)
+
+    # Strip Embedded CMS Video/Photo Intermissions
+    # Matches variations of "Lees verder onder de video/foto" sandwiched between newlines
+    text = re.sub(r"\n\s*Lees\s+verder\s+onder\s+de\s+(?:video|foto)\s*\n", "\n", text, flags=re.IGNORECASE)
+    # Removes lines that are likely to be injected section headers or video captions, which are short and do not end with proper sentence punctuation.
+    text = re.sub(r"\n\n([^\n]{2,45})(?<![.!?])\n\n", "\n\n", text)
+
+    # Strip Injected Author Sign-Off Footers
+    # Pass the 'author' field from your JSON entry into this function.
+    # If the text ends with the author's name on its own line, we cut it off.
+    if author_list and isinstance(author_list, list):
+        for author in author_list:
+            if author:
+                # Creates a regex that looks for the exact author name at the end of the text block
+                # allowing for flexible trailing whitespaces.
+                author_signature_pattern = r"\n\n" + re.escape(author) + r"\s*$"
+                text = re.sub(author_signature_pattern, "", text, flags=re.IGNORECASE)
+
+    # Re-normalize final layout padding strings
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def clean_article_dvhn(text, author_list=None):
+    if not text or not isinstance(text, str):
+        return ""
+
+    # First apply the base cleaning 
+    text = clean_article_base(text)
+
+    # Alternate check: If an author array is present, explicitly pop their name from the start
+    if author_list and isinstance(author_list, list):
+        for author in author_list:
+            if author:
+                # Strips name if it sits isolated on its own line at the top
+                text = re.sub(r"^" + re.escape(author) + r"\s*\n\n", "", text, flags=re.IGNORECASE)
+
+    # Remove GPE entities if they appear in the first two words of the text
+    text = remove_gpe_entities(text)
+
+    # If the text starts with lowercase and is shorter than 40 characters before \n\n then remove this part
+    text = re.sub(r"^[a-zà-ÿ][^\n]{0,38}\n\n", "", text)
+
+    # Re-normalize final layout padding strings
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def clean_article_stc(text):
+    if not text or not isinstance(text, str):
+        return ""
+
+    # First apply the base cleaning 
+    text = clean_article_base(text)
+
+    # Remove GPE entities if they appear in the first two words of the text
+    text = remove_gpe_entities(text)
+
+    # Re-normalize final layout padding strings
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def clean_article_nof(text):
+    if not text or not isinstance(text, str):
+        return ""
+
+    # First apply the base cleaning 
+    text = clean_article_base(text)
+
+    # Strip "Uit het Algemeen Nieuws- en Advertentieblad" and the rest of the dateline before \n\n
+    text = re.sub(r"^Uit het\s+.*?\n\n", "", text, flags=re.IGNORECASE)
+
+    # Remove GPE entities if they appear in the first two words of the text
+    text = remove_gpe_entities(text)
+
+    # Re-normalize final layout padding strings
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def clean_article(article_dict, source=None):
+    """ Cleans all fields of the article dictionary and returns the cleaned version. """
     article_dict["author"] = clean_author(article_dict["author"])
     article_dict["date"] = format_date(article_dict["date"])
-    article_dict["full_text"], highlight = clean_text_block(article_dict["full_text"], is_full_text=True)
-    article_dict["highlight"] = clean_text_block(article_dict["highlight"] + " " + highlight)
+    # Apply different cleaning rules specific to each source
+    if source == "Eindhovens Dagblad":
+        article_dict["full_text"] = clean_article_ed(article_dict["full_text"], author_list=article_dict["author"])
+        article_dict["highlight"] = clean_article_ed(article_dict["highlight"], author_list=article_dict["author"])
+    elif source == "de Telegraaf":
+        article_dict["full_text"] = clean_article_tgf(article_dict["full_text"])
+        article_dict["highlight"] = clean_article_tgf(article_dict["highlight"])
+    elif source == "Dagblad van het Noorden":
+        article_dict["full_text"] = clean_article_dvhn(article_dict["full_text"], author_list=article_dict["author"])
+        article_dict["highlight"] = clean_article_dvhn(article_dict["highlight"], author_list=article_dict["author"])
+    elif source == "Steenwijker Courant":
+        article_dict["full_text"] = clean_article_stc(article_dict["full_text"])
+        article_dict["highlight"] = clean_article_stc(article_dict["highlight"])
+    elif source == "Nieuwsblad Noordoost-Friesland":
+        article_dict["full_text"] = clean_article_nof(article_dict["full_text"])
+        article_dict["highlight"] = clean_article_nof(article_dict["highlight"])
+    else:
+        article_dict["full_text"] = clean_article_base(article_dict["full_text"])
+        article_dict["highlight"] = clean_article_base(article_dict["highlight"])
     return article_dict
 
 
@@ -239,6 +524,10 @@ def parse_txt_to_list(input_file, source):
         content = f.read()
 
     chunks = content.split("End of Document")
+    # take 50 random chunks for testing purposes, we will remove this line for the final version
+    # add a seed for reproducibility
+    random.seed(42)
+    chunks = random.sample(chunks, 300)
     raw_articles = []
 
     for chunk in chunks:
@@ -285,7 +574,7 @@ def main(argv=None):
     # Execute the parsing and cleaning pipeline
     raw_data = parse_txt_to_list(args.input, args.source)
     print(f"Found {len(raw_data)} articles. Cleaning data...")
-    final_data = [clean_article(art) for art in raw_data]
+    final_data = [clean_article(art, source=args.source) for art in raw_data]
     with open(args.output, 'w', encoding='utf-8') as f:
         json.dump(final_data, f, ensure_ascii=False, indent=4)
     print(f"Output saved to: {args.output}")
