@@ -81,13 +81,13 @@ def is_agenda(article_dict: dict) -> bool:
     
     # Specifieke woorden die vaak in regionale agenda's staan
     agenda_keywords = [
-        'opg.',               # opgave/opgeven
+        'opg.',               
         'entree', 
         'excursie', 
         'stadswandeling', 
         'aanmelden via', 
-        'organist; klassiek', # Komt extreem veel voor in jouw Friese/Groningse data
-        'o.l.v.'              # onder leiding van
+        'organist; klassiek', 
+        'o.l.v.'              
     ]
     
     keyword_hits = sum(1 for kw in agenda_keywords if kw in text_lower)
@@ -232,14 +232,6 @@ def filter_article_nof(article_dict: dict) -> bool:
         return True
 
     return False
-    
-    
-def filter_article_vk(article_dict: dict) -> bool:
-    """Filters for the 6th paper."""
-    if filter_article_base(article_dict): 
-        return True
-    # Add 6th paper specific rules here
-    return False
 
 
 def is_junk(article_dict: dict, source: str = None) -> bool:
@@ -257,8 +249,6 @@ def is_junk(article_dict: dict, source: str = None) -> bool:
         return filter_article_stc(article_dict)
     elif source == "Nieuwsblad Noordoost-Friesland":
         return filter_article_nof(article_dict)
-    elif source == "de Volkskrant":
-        return filter_article_paper6(article_dict)
     else:
         # Fallback to base filter if source is unknown
         return filter_article_base(article_dict)
