@@ -12,19 +12,18 @@ def is_recipe(article_dict: dict) -> bool:
     full_text = article_dict.get('full_text', '').lower()
     title = article_dict.get('title', '').lower()
     
-    # 1. Explicit Title Checks
+    # Title checks
     recipe_title_keywords = ['recept:', 'recept van de dag', 'koken:']
     if any(kw in title for kw in recipe_title_keywords):
         return True
         
-    # 2. Starting Phrase Checks
-    # Many parsed recipes start immediately with these words
+    # Starting phrase check
     starts = ('ingrediënten', 'je hebt nodig', 'bereiding', 'nodig:')
     if full_text.startswith(starts):
         return True
         
-    # 3. Keyword Density Heuristic
-    # If a text contains multiple cooking action verbs and measurements, it's likely a recipe
+    # Keyword Density Heuristic
+    # If a text contains multiple cooking action verbs and measurements it's likely a recipe
     recipe_keywords = [
         'ingrediënten', 'bereidingswijze', 'bereidingstijd', 'kooktijd',
         'snijd', 'meng', 'voeg toe', 'verwarm de oven', 'eetlepel', 'theelepel',
@@ -34,16 +33,14 @@ def is_recipe(article_dict: dict) -> bool:
     
     keyword_hits = sum(1 for kw in recipe_keywords if kw in full_text)
     
-    # If we hit 3 or more distinct recipe-related words, flag it
+    # If we hit 3 or more distinct recipe-related words we remove it
     if keyword_hits >= 3:
         return True
         
-    # 4. Ingredient List Regex
-    # Matches lines starting with numbers followed by Dutch measurements 
-    # e.g., "2 eetlepels olijfolie", "500 gram kip", "1.5 liter bouillon"
+    # Ingredient List Regex
     ingredient_pattern = r'(?m)^\s*\d+(?:[\.,]\d+)?\s*(?:gram|gr|ml|liter|el|tl|eetlepel|theelepel|stuks?|teentjes?|snufje)\s+[a-z]+'
     
-    # If we find 3 or more ingredient lines, it's a recipe
+    # If we find 3 or more ingredient lines it's likely a recipe
     if len(re.findall(ingredient_pattern, full_text)) >= 3:
         return True
         
@@ -59,27 +56,24 @@ def is_agenda(article_dict: dict) -> bool:
     text_lower = full_text.lower()
     title = article_dict.get('title', '').lower()
     
-    # 1. Controleer de titel op agenda-woorden
+    # Title checks
     agenda_titles = ['agenda', 'uitagenda', 'evenementen', 'wat is er te doen', 'weekend', 'tips']
     if any(kw in title for kw in agenda_titles):
         return True
 
-    # 2. Zoek naar tijdsblokken (bijv. 11.00-17.00, 14:00 - 15:30)
-    # Dit patroon zoekt naar twee tijden gekoppeld door een streepje
+    # Look for time blocks (e.g. 11.00-17.00, 14:00 - 15:30)
     time_block_pattern = r'\b\d{1,2}[:.]\d{2}\s*-\s*\d{1,2}[:.]\d{2}\b'
     time_blocks = re.findall(time_block_pattern, full_text)
     
-    # In jouw voorbeeldtekst staan meer dan 15 van dit soort tijdsblokken.
-    # Als we er 4 of meer vinden in één artikel, is het vrijwel zeker een agenda.
+    # If there are 4 or more it is likely an agenda
     if len(time_blocks) >= 4:
         return True
         
-    # 3. Zoek naar losse tijden gecombineerd met typische agenda-woorden
-    # Patroon voor enkele tijden (bijv. 11.00 of 20:45)
+    # Phrase and time check
     single_time_pattern = r'\b\d{1,2}[:.]\d{2}\b'
     single_times = re.findall(single_time_pattern, full_text)
     
-    # Specifieke woorden die vaak in regionale agenda's staan
+    # Phrase check
     agenda_keywords = [
         'opg.',               
         'entree', 
@@ -92,7 +86,7 @@ def is_agenda(article_dict: dict) -> bool:
     
     keyword_hits = sum(1 for kw in agenda_keywords if kw in text_lower)
     
-    # Als er minimaal 5 losse tijden in de tekst staan en we vinden 2 of meer typische agenda-woorden
+    # Minimum of 5 times and 2 phrases it's likely an agenda
     if len(single_times) >= 5 and keyword_hits >= 2:
         return True
         
