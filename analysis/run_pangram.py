@@ -19,8 +19,6 @@ def parse_args():
     p.add_argument("--no-resume", dest="resume", action="store_false")
     p.add_argument("--limit", "-l",  type=int,   default=None)
     p.add_argument("--delay",  type=float, default=0.2)
-    p.add_argument("--dry-run", action="store_true",
-                   help="Validate everything without calling the API")
     p.add_argument("--test",   type=int,   default=None, metavar="N",
                    help="Send only N articles to the API (saves to test_output.jsonl)")
     return p.parse_args()
