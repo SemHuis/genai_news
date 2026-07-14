@@ -1,16 +1,186 @@
 """
+article_metrics.py
+==================
 Computes all stylometric and focal-word metrics for Dutch newspaper articles.
-Reads pre-parsed JSONL output from stanza_parse.py.
+Designed to read pre-parsed JSONL output from stanza_parse.py.
+Can also run in simplemma fallback mode (--simplemma) without pre-parsed input,
+but POS-based and syntactic metrics will be NaN in that case.
+
+Run once per outlet. Output filenames should follow the convention
+{code}_metrics_results_body.csv, where code is one of:
+  tgf   (Telegraaf)
+  dvhn  (Dagblad van het Noorden)
+  vk    (Volkskrant)
+  ed    (Eindhovens Dagblad)
+  stc   (Steenwijker Courant)
+  nof   (Noordoost Friesland / nnofriesland)
+analysis.R expects exactly these six filenames (see its INPUT_FILES config).
+
+Metric families
+---------------
+LEXICAL DIVERSITY
+  mtld               Measure of Textual Lexical Diversity (McCarthy & Jarvis 2010)
+                     Computed on content-word lemmas (NOUN, VERB, ADJ, ADV).
+                     NaN for articles with fewer than 50 content words.
+
+LEXICAL SOPHISTICATION  (requires --freq_source plus the matching frequency file)
+  prop_low_freq      Proportion of content tokens with Zipf < low_freq_threshold
+  prop_high_freq     Proportion of content tokens with Zipf >= high_freq_threshold
+  mean_zipf          Mean Zipf score across content tokens with known frequency
+
+  Two frequency sources are supported; --freq_source picks which one is used:
+    subtlex   Subtlex-NL (Keuleers et al. 2010) word-frequency norms, via --subtlex.
+    sonar     A SoNaR-1-derived word-frequency list, via --sonar. SoNaR-1 itself
+              ships as an annotated corpus tree (see README.pdf: DOC/COREF/NE/
+              SRL/SPT/POS), not a ready-made frequency list, so --sonar expects a
+              precomputed word (or lemma) + frequency table that you have already
+              tallied from the POS/ directory's DCOI-tagged text (one word/lemma
+              per line, e.g. via a one-off counting pass over POS/). If your file
+              already has Zipf values, those are used directly; if it has raw
+              counts, they are converted to Zipf using van Heuven et al. (2014):
+              Zipf = log10(count-per-million-words) + 3, with the corpus size
+              taken from --sonar_corpus_size if given, otherwise from the sum of
+              all counts in the file.
+  If --freq_source is omitted entirely, lexical sophistication metrics are NaN.
+
+FUNCTION-WORD DISTRIBUTIONS
+  freq_pronoun       PRON per 1000 words
+  freq_aux           AUX per 1000 words
+  freq_det           DET per 1000 words
+  freq_cconj         CCONJ per 1000 words
+  freq_adv           ADV per 1000 words
+  freq_adp           ADP per 1000 words
+
+SYNTACTIC COMPLEXITY
+  mean_sent_len      Mean sentence length in tokens
+  cv_sent_len        Coefficient of variation of sentence lengths (burstiness proxy)
+  mean_dep_depth     Mean max dependency tree depth per sentence
+  finite_verbs_per_sent  Mean finite verb count per sentence (clause density)
+  mean_tunit_len     Mean T-unit length (main clause + subordinates; split at
+                     coordinated root clauses)
+  nom_rate           Proportion of NOUN tokens with Dutch nominalisation suffixes
+
+FOCAL WORDS  (Juzek 2026 LPR word list required via --wordlist)
+  Methodology follows Juzek (2026) Sec. 3.4-3.6: words are not selected by
+  an arbitrary score threshold, but by RANK against a log prevalence ratio
+  (LPR) computed upstream by the same pipeline diachronic_opm.py reads
+  (las_word_{lang}.csv: key, lemma, upos, lpr_MH_guarded, lpr_guard_ok).
+  --wordlist must be that file, not an older Delta_MH/relpct_MH-format CSV.
+
+  For each N in --n_seeds (default 20, 50, 200 — Sec. 3.4-3.5's headline
+  and embedding-robustness sizes):
+    llm_style_word_ratio_top{N}        AI-seed (top-N by LPR) tokens per
+                                        1000 words
+    llm_style_word_count_top{N}        same, as a raw integer count (exact
+                                        input for a corpus-level chi-square
+                                        test; avoids re-deriving counts from
+                                        a rounded per-1000-words rate)
+    weighted_llm_ratio_top{N}_per1k    AI-seed tokens per 1000 words,
+                                        weighted by each match's LPR value
+    baseline_word_ratio_top{N}         matched baseline (near-zero-LPR,
+                                        UPOS-matched to the AI seeds) tokens
+                                        per 1000 words — Sec. 3.5's control
+                                        condition, not an "anti-AI" extreme
+    baseline_word_count_top{N}         raw integer count, baseline
+    baseline_weighted_ratio_top{N}_per1k
+
+  {category}_freq_per1k  One column per semantic category (built-in:
+                         care_rigour_freq_per1k, emphasize_freq_per1k,
+                         importance_freq_per1k — Juzek 2026 Sec. 3.6's three
+                         diachronic concepts; or whatever your --categories
+                         CSV defines). Validated against the top-
+                         --category_pool_n AI pool (default 200) regardless
+                         of which --n_seeds were requested. analysis.R
+                         discovers these columns automatically and plots
+                         each one separately.
+
+                         CAVEAT: Dutch was not among the 10 languages with
+                         2012-2024 WMT coverage Juzek (2026) used for the
+                         diachronic concept analysis, so only 'emphasize'
+                         has a paper-verified Dutch seed lemma
+                         ('benadrukken', from the separate 34-language
+                         qualitative table). 'care_rigour' and 'importance'
+                         ship with unverified best-effort Dutch translations
+                         — review/replace via --categories before treating
+                         results as directly comparable to the paper's.
+
+GENERAL
+  total_words        Total token count
+  total_sentences    Sentence count
+  char_count         Character count of analysed text
+  word_count_title   Word count of title field only (editorial influence proxy)
+
+Usage
+-----
+  # Full run, SoNaR as the frequency source, default top-20/50/100/200:
+  # python3 article_metrics.py --parsed_jsonl /home/semhuis/RUG/msc_thesis/analysis/stanza_parse/body/vk_parsed_body_only.jsonl --wordlist data/las_word_nl.csv --freq_source sonar --sonar data/sonar_newspapers_stanza_format.jsonl --output vk_metrics_results_body.csv
+
+  # Only the headline top-20 analysis (skip 50/200):
+  python article_metrics.py \\
+      --articles articles.json \\
+      --wordlist las_word_nl.csv \\
+      --freq_source subtlex \\
+      --subtlex subtlex_nl.csv \\
+      --n_seeds 20 \\
+      --output dvhn_metrics_results_body.csv
+
+  # Full run, SoNaR-1-derived frequency list instead of Subtlex:
+  python article_metrics.py \\
+      --articles articles.json \\
+      --wordlist las_word_nl.csv \\
+      --freq_source sonar \\
+      --sonar sonar1_word_freq.csv \\
+      --output dvhn_metrics_results_body.csv
+
+  # Without focal words:
+  python article_metrics.py \\
+      --articles articles.json \\
+      --freq_source subtlex \\
+      --subtlex subtlex_nl.csv \\
+      --output dvhn_metrics_results_body.csv
+
+  # Simplemma fallback (no POS/syntax metrics):
+  python article_metrics.py \\
+      --articles articles.json \\
+      --simplemma \\
+      --output dvhn_metrics_results_body.csv
+
+  # Resume interrupted run:
+  python article_metrics.py \\
+      --articles articles.json \\
+      --wordlist las_word_nl.csv \\
+      --freq_source subtlex \\
+      --subtlex subtlex_nl.csv \\
+      --output dvhn_metrics_results_body.csv \\
+      --checkpoint_every 500
+
+  # HPC recommended settings:
+  python article_metrics.py \\
+      --articles articles.json \\
+      --wordlist las_word_nl.csv \\
+      --freq_source subtlex \\
+      --subtlex subtlex_nl.csv \\
+      --output dvhn_metrics_results_body.csv \\
+      --text_scope body_only \\
+      --batch_size 64 \\
+      --checkpoint_every 1000
 """
 
 import sys
+
+if sys.version_info < (3, 8):
+    sys.exit(
+        "ERROR: Python 3.8+ required. Current: {}.{}.{}\n"
+        "On HPC: module load Python/3.11.5-GCCcore-13.2.0".format(*sys.version_info[:3])
+    )
+
 import json
 import csv
 import argparse
 import math
 import os
 import time
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 import pandas as pd
 import simplemma
@@ -24,12 +194,16 @@ except ImportError:
     print("[warning] pip install lexicalrichness")
 
 
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# ---------------------------------------------------------------------------
+
 # Dutch nominalisation suffixes — core productive suffixes only
 # Validated against Dutch morphology (de Haas & Trommelen 1993)
 # Removed: -age, -ance, -ence, -ment (loanword patterns, not core Dutch)
 NOM_SUFFIXES = (
     'ing', 'heid', 'atie', 'sie', 'nis',
-    'schap', 'iteit', 'isme', 'tie',
+    'schap', 'iteit', 'tie',
 )
 
 # Content POS tags for MTLD and lexical sophistication
@@ -48,30 +222,123 @@ FUNCTION_WORD_POS = {
 MTLD_MIN_CONTENT_WORDS = 50
 MTLD_THRESHOLD = 0.72
 
-DEFAULT_LOW_FREQ  = 3.0
-DEFAULT_HIGH_FREQ = 5.0
+DEFAULT_LOW_FREQ  = 3.0   # Zipf < 3.0 → low-frequency (< 1 per 1000 words)
+DEFAULT_HIGH_FREQ = 4.0   # Zipf ≥ 5.0 → high-frequency (≥ 10 per million)
 
-# Focal word categories (built-in; overridable via --categories CSV)
+# Zipf score assigned to words with FREQlemma=0 in Subtlex, or to words
+# not found in the frequency dictionary at runtime. A word appearing
+# exactly once in Subtlex-NL's 43.8M-word corpus has
+# Zipf = log10(1/43.8) + 3 ≈ 1.36, so 1.0 is a defensible floor: it
+# sits just below "barely observed" and keeps all values on the 1–7 scale,
+# so that unseen words count as low-frequency for prop_low_freq without
+# producing −∞ values that would distort mean_zipf.
+ZIPF_FLOOR_FOR_UNSEEN = 1.0
+
+
+# Default top-N seed sizes for AI-overused / baseline word selection, per
+# Juzek (2026) Sec. 3.4-3.5: the headline pre/post analysis uses top-20,
+# the embedding-convergence robustness check additionally uses 50/200.
+DEFAULT_N_SEEDS = [20, 50, 200]
+
+# The semantic-category word sets (see BUILTIN_FOCAL_CATEGORIES below) are
+# validated against the top-CATEGORY_POOL_N AI-overused pool specifically —
+# Juzek (2026) Sec. 3.6/4.2 derive their three diachronic concepts from each
+# language's top-200 LPR list, independent of whichever N(s) are requested
+# for the main AI-vs-baseline ratio metrics.
+CATEGORY_POOL_N = 200
+
+# Focal word categories (built-in; overridable via --categories CSV).
+# These three concepts — care/rigour, emphasize, importance — are exactly
+# the three semantic concepts Juzek (2026) Figure 3 / Table 3 track in the
+# 2012-2024 diachronic longitudinal analysis (Sec. 3.6), NOT the slightly
+# different three-concept set in Table 2 (emphasize/importance/innovative)
+# from the separate qualitative cross-lingual convergence analysis (Sec 4.2).
+#
+# IMPORTANT CAVEAT: Dutch was not among the 10 languages with 2012-2024 WMT
+# coverage used in that diachronic analysis (Table 3 lists cs/de/en/es/fr/
+# it/pt/ru/hi/zh only), so the paper provides no verified Dutch lemma list
+# for 'care_rigour' or 'importance'. The only paper-confirmed Dutch lemma
+# here is 'benadrukken' (emphasize/highlight, Table 2's qualitative table,
+# which DOES cover all 34 languages including Dutch). Every other lemma
+# below is an unverified best-effort translation of the concept and should
+# be reviewed — ideally against this corpus's own top-200 Dutch LPR list —
+# before being treated as equivalent to the paper's validated lists. Use
+# --categories to supply a reviewed replacement.
 BUILTIN_FOCAL_CATEGORIES = {
-    'emphasis': {
-        'benadrukken', 'benadrukten', 'belichten', 'onderstrepen',
-        'accentueren', 'verduidelijken', 'illustreren', 'markeren',
-        'kenmerken', 'weerspiegelen', 'omvatten', 'tonen', 'wijzen',
-        'aanduiden', 'uitlichten', 'aantonen',
+    'care_rigour': {
+        # ADJ: careful, rigorous, thorough, precise, meticulous
+        # UNVERIFIED for Dutch — paper has no Dutch entry for this concept.
+        'grondig',
+    },
+    'emphasize': {
+        # VERB: emphasize, stress, highlight
+        # 'benadrukken' is paper-confirmed (Table 2, NL entry). The rest
+        # are unverified extensions of the same concept.
+        'benadrukken',
     },
     'importance': {
-        'belang', 'prioriteit', 'transparantie', 'consistentie', 'precisie',
-        'veerkracht', 'inclusie', 'duurzaamheid', 'relevantie',
-        'doelgerichtheid', 'vastberadenheid', 'eerlijkheid', 'teamgeest',
-        'impact', 'waarde',
-    },
-    'innovation': {
-        'innovatief', 'baanbrekend', 'geavanceerd', 'toonaangevend',
-        'revolutionair', 'technologisch', 'modern', 'veelbelovend',
-        'indrukwekkend', 'nauwlettend', 'duurzaam', 'robuust', 'dynamisch',
-        'strategisch', 'effectief', 'efficiënt', 'significant', 'cruciaal',
+        # NOUN: importance, significance, priority, necessity
+        # UNVERIFIED for Dutch — paper has no Dutch entry for this concept
+        # either (not among the 20/34 languages in Table 2's importance row).
+        'belang',
     },
 }
+
+
+
+# ---------------------------------------------------------------------------
+# 1.  NLP BACKENDS
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 1.  SIMPLEMMA FALLBACK PARSER
+# ---------------------------------------------------------------------------
+# Used when --simplemma is passed and no pre-parsed JSONL is provided.
+# Provides lemmatisation and basic sentence splitting only.
+# POS tags and dependency parses are unavailable in this path.
+# For full metrics, use stanza_parse.py to pre-parse your articles
+# and pass the output JSONL via --parsed_jsonl.
+# ---------------------------------------------------------------------------
+
+class SimplemmaParser:
+    """
+    Lightweight fallback: simplemma lemmatisation + regex sentence splitting.
+    Syntax and POS metrics will be NaN.
+    Use stanza_parse.py for full metric coverage.
+    """
+    import re as _re
+    _WORD_RE = _re.compile(
+        r"[A-Za-z\xc0-\xd6\xd8-\xf6\xf8-\xff\u0100-\u024F]+"
+        r"(?:[-'][A-Za-z\xc0-\xd6\xd8-\xf6\xf8-\xff\u0100-\u024F]+)*",
+        _re.UNICODE,
+    )
+    _ABBREV = {'dr', 'mr', 'ir', 'drs', 'prof', 'vs', 'bijv', 'o.a', 'nl',
+               'ca', 'zgn', 'mw', 'dhr', 'ed', 'enz', 'etc', 'fig', 'nr'}
+    _SENT_RE = _re.compile(r'(?<=[.!?])\s+(?=[A-Z])', _re.UNICODE)
+
+    def parse_batch(self, texts, batch_size=None):
+        return [self._parse_one(t) if t and t.strip() else None for t in texts]
+
+    def _parse_one(self, text):
+        raw_sents = self._SENT_RE.split(text)
+        sent_lengths = []
+        for s in raw_sents:
+            toks = self._WORD_RE.findall(s)
+            if toks and toks[-1].lower().rstrip('.') in self._ABBREV:
+                continue
+            if toks:
+                sent_lengths.append(len(toks))
+        all_tokens = self._WORD_RE.findall(text.lower())
+        lemmas = [simplemma.lemmatize(t, lang='nl') for t in all_tokens]
+        return _PseudoDoc(all_tokens, lemmas, sent_lengths)
+
+    @property
+    def provides_syntax(self):
+        return False
+
+    @property
+    def name(self):
+        return "simplemma (lemma only — POS/syntax metrics unavailable)"
 
 
 class _PseudoDoc:
@@ -81,6 +348,9 @@ class _PseudoDoc:
         self.sent_lengths = sent_lengths
 
 
+# ---------------------------------------------------------------------------
+# 2.  WORD-FREQUENCY LOADERS  (Subtlex-NL and SoNaR-1)
+# ---------------------------------------------------------------------------
 # Both loaders produce the same shape of output: a {lowercased word: zipf}
 # dict. Which one is actually used is controlled by --freq_source; only one
 # is loaded per run (see process_articles()).
@@ -170,10 +440,53 @@ def _parse_delimited_table(path, label):
 
 def load_subtlex(path, word_col=None, zipf_col=None):
     """
-    Load Subtlex-NL frequency norms.
-    Uses manual line-by-line parsing to bypass pandas quoting issues,
-    then falls back to pandas if needed.
+    Load Subtlex-NL frequency norms (Keuleers et al. 2010), building a
+    {lowercased_lemma: Zipf_score} dict for use in _lex_sophistication().
+
+    Column strategy (in priority order):
+    1. FREQlemma — the sum of raw corpus counts across ALL inflected forms
+       of the lemma a headword belongs to (e.g. the entry 'lopen' has
+       FREQlemma = sum of 'lopen' + 'loopt' + 'liep' + 'gelopen' + …).
+       This is the correct denominator when looking up by lemma (as Stanza
+       provides), because it captures the full lexeme frequency, not just
+       one word form. Converted to Zipf via van Heuven et al. (2014):
+           Zipf = log10(FREQlemma / 43.8) + 3
+       where 43.8 is the Subtlex-NL corpus size in millions of words.
+
+    2. FREQcount — raw count of the specific word form. Used if FREQlemma
+       is not present. Same Zipf formula (same 43.8M denominator).
+
+    3. A pre-computed Zipf column ('Zipf', 'ZipfValue', …) — used as-is.
+
+    4. Lg10WF — log10(FREQcount + 1). Used only as a last resort, with a
+       warning that thresholds (--low_freq_threshold, --high_freq_threshold)
+       need re-calibration since this is NOT on the Zipf 1–7 scale.
+
+    Ultra-rare / unseen words:
+       Words in the Subtlex file with FREQlemma=0 (or any frequency-source
+       value of 0), and words looked up at runtime that are not in the file
+       at all, are assigned Zipf = ZIPF_FLOOR = 1.0. Rationale: a word
+       appearing exactly once in the 43.8M-word corpus has
+       Zipf = log10(1/43.8) + 3 ≈ 1.36, so 1.0 sits just below "barely
+       observed" and keeps all values on the meaningful part of the 1–7
+       scale. This means unseen words count as low-frequency (below the
+       default threshold of 3.0) without producing −∞ values that would
+       distort mean_zipf. Note that _lex_sophistication() assigns the floor
+       only for words it actually finds in the returned dict; words not in
+       the dict at all are excluded from the mean but still counted in the
+       low-frequency proportion. See ZIPF_FLOOR_FOR_UNSEEN in the constants
+       section if you need to change the floor.
+
+    Lookup at analysis time:
+       _lex_sophistication() looks up w.lemma.lower() (Stanza lemma) against
+       this dict. Dutch Stanza lemmas are citation forms (infinitive/singular/
+       positive), which match Subtlex headword forms for the large majority of
+       content words. Mismatches (Stanza lemma differs from the Subtlex
+       headword) are simply treated as "not in dict" and excluded from
+       mean_zipf (but see the UNSEEN handling in _lex_sophistication).
     """
+    SUBTLEX_CORPUS_SIZE_M = 43.8   # Keuleers et al. 2010: 43.8 million tokens
+
     df = _parse_delimited_table(path, 'subtlex')
 
     if word_col is None:
@@ -185,66 +498,99 @@ def load_subtlex(path, word_col=None, zipf_col=None):
         raise ValueError("Cannot detect word column. Columns: {}. "
                          "Use --subtlex_word_col.".format(list(df.columns)))
 
-    if zipf_col is None:
-        # Try Zipf-named columns first, then log-frequency equivalents.
-        # Subtlex-NL (Keuleers et al. 2010) uses Lg10WF (log10 word frequency)
-        # which is on a comparable scale to Zipf scores.
-        for c in ('Zipf', 'ZipfValue', 'zipf', 'ZIPF', 'Zipf_value',
-                  'Lg10WF', 'Lg10CD', 'SUBTLEXWF', 'lg10wf'):
-            if c in df.columns:
-                zipf_col = c
-                print("[subtlex] Using '{}' as frequency column.".format(c))
-                if c in ('Lg10WF', 'Lg10CD', 'lg10wf'):
-                    print("[subtlex] NOTE: '{}' is log10 frequency, not Zipf.".format(c))
-                    print("[subtlex] Thresholds --low_freq_threshold and "
-                          "--high_freq_threshold should be adjusted accordingly.")
-                    print("[subtlex] Typical Lg10WF range: 0 (rare) to 4+ (very common).")
-                    print("[subtlex] Suggested: --low_freq_threshold 1.0 "
-                          "--high_freq_threshold 2.5")
-                break
-    if zipf_col is None:
-        raise ValueError(
-            "Cannot detect frequency column. Columns: {}. "
-            "Use --subtlex_zipf_col to specify which column to use.".format(
-                list(df.columns)
-            )
-        )
+    # Determine what we're actually computing Zipf from.
+    # raw_col: a count column → convert via Zipf formula
+    # pre_col: already a Zipf or log-frequency column → use directly (maybe warn)
+    raw_col = None
+    pre_col = None
+
+    if zipf_col:
+        # Caller explicitly specified one column — honour it
+        if zipf_col in df.columns:
+            pre_col = zipf_col
+        else:
+            raise ValueError("Specified --subtlex_zipf_col '{}' not in file. "
+                             "Columns: {}".format(zipf_col, list(df.columns)))
+    else:
+        # Auto-detect: prefer FREQlemma → FREQcount → pre-scaled Zipf → Lg10WF
+        if 'FREQlemma' in df.columns:
+            raw_col = 'FREQlemma'
+            print("[subtlex] Using 'FREQlemma' (aggregate lemma count) → converting "
+                  "to Zipf = log10(FREQlemma / {}) + 3.".format(SUBTLEX_CORPUS_SIZE_M))
+        elif 'FREQcount' in df.columns:
+            raw_col = 'FREQcount'
+            print("[subtlex] 'FREQlemma' not found; using 'FREQcount' (single-form "
+                  "count) → converting to Zipf. Lemma-lookup accuracy may be "
+                  "reduced for inflected words.")
+        else:
+            for c in ('Zipf', 'ZipfValue', 'zipf', 'ZIPF', 'Zipf_value'):
+                if c in df.columns:
+                    pre_col = c
+                    print("[subtlex] Using pre-computed Zipf column '{}'.".format(c))
+                    break
+            if pre_col is None:
+                for c in ('Lg10WF', 'lg10wf', 'Lg10CD'):
+                    if c in df.columns:
+                        pre_col = c
+                        print("[subtlex] WARNING: using '{}' (log10 count, NOT Zipf). "
+                              "This column is on a different scale (0–5) from the "
+                              "default thresholds (low=3.0, high=5.0). Either pass "
+                              "--low_freq_threshold 1.0 --high_freq_threshold 2.5 or "
+                              "supply a file with FREQlemma / FREQcount.".format(c))
+                        break
+            if pre_col is None and raw_col is None:
+                raise ValueError(
+                    "Cannot find a usable frequency column. Columns: {}. "
+                    "Expected: FREQlemma, FREQcount, Zipf, or Lg10WF.".format(
+                        list(df.columns)))
 
     freq_dict = {}
-    n_failed = 0
+    n_floored = 0
+    n_failed  = 0
+
     for _, row in df.iterrows():
         w = str(row[word_col]).strip().lower()
         if not w or w in ('nan', 'none', ''):
             continue
-        raw = str(row[zipf_col]).strip()
-        # Handle Dutch locale decimal comma and common missing value markers
-        raw = raw.replace(',', '.').replace(' ', '')
+
+        col = raw_col or pre_col
+        raw = str(row[col]).strip().replace(',', '.').replace(' ', '')
         if raw in ('', 'nan', 'none', 'na', '-', '.'):
             n_failed += 1
             continue
         try:
-            freq_dict[w] = float(raw)
+            val = float(raw)
         except (ValueError, TypeError):
             n_failed += 1
+            continue
 
-    print("[subtlex] {:,} entries loaded (skipped {:,} unparseable values).".format(
-        len(freq_dict), n_failed
-    ))
-    print("[subtlex] Word col: '{}', Zipf col: '{}'".format(word_col, zipf_col))
+        if raw_col:
+            # Convert raw count to Zipf
+            if val <= 0:
+                zipf = ZIPF_FLOOR_FOR_UNSEEN
+                n_floored += 1
+            else:
+                zipf = math.log10(val / SUBTLEX_CORPUS_SIZE_M) + 3
+        else:
+            zipf = val  # already Zipf or Lg10WF
 
-    # Diagnostic: show value range so user can verify thresholds are sensible
+        freq_dict[w] = zipf
+
+    col_used = raw_col or pre_col
+    print("[subtlex] {:,} entries loaded ({:,} floored to Zipf={}, "
+          "{:,} skipped unparseable).".format(
+              len(freq_dict), n_floored, ZIPF_FLOOR_FOR_UNSEEN, n_failed))
+    print("[subtlex] Word col: '{}', freq col: '{}' → Zipf scale.".format(
+          word_col, col_used))
+
     if freq_dict:
         vals = list(freq_dict.values())
-        print("[subtlex] {} value range: min={:.3f}, median={:.3f}, max={:.3f}".format(
-            zipf_col,
-            min(vals),
-            sorted(vals)[len(vals)//2],
-            max(vals),
-        ))
+        print("[subtlex] Zipf range: min={:.3f}, median={:.3f}, max={:.3f} "
+              "(expected ~1–7 for a Zipf scale; ~0–5 for Lg10WF).".format(
+                  min(vals), sorted(vals)[len(vals)//2], max(vals)))
 
-    if len(freq_dict) == 0:
+    if not freq_dict:
         print("[subtlex] WARNING: freq_dict is empty — lexical sophistication will be NaN.")
-        print("[subtlex] Check that word_col and zipf_col point to the correct columns.")
 
     return freq_dict
 
@@ -252,7 +598,91 @@ def load_subtlex(path, word_col=None, zipf_col=None):
 def load_sonar(path, word_col=None, freq_col=None, corpus_size=None):
     """
     Load a SoNaR-1-derived word-frequency list as an alternative to Subtlex-NL.
+
+    Supports two formats:
+    1. JSONL — one JSON object per line with at least 'lemma' (or 'text') and
+       'frequency' fields, as produced by a corpus frequency tally:
+         {"text": "de", "lemma": "de", "upos": "DET", "frequency": 11205631}
+       Lookup is by lemma (preferred) or text if lemma is absent.
+    2. Delimited table (CSV/TSV) — any encoding, column names auto-detected.
+       Column priority: word/lemma column auto-detected; frequency column
+       converted from raw count to Zipf if not already a Zipf column.
+
+    Zipf conversion: Zipf = log10(count / corpus_size_in_millions) + 3
+    following van Heuven et al. (2014). corpus_size defaults to the sum of
+    all counts in the file; pass --sonar_corpus_size to override.
+    Words with count = 0 are assigned ZIPF_FLOOR_FOR_UNSEEN.
     """
+    import json as _json
+
+    # ── Auto-detect JSONL vs delimited ──────────────────────────────────────
+    def _is_jsonl(p):
+        try:
+            with open(p, 'r', encoding='utf-8') as f:
+                first = f.read(1).strip()
+            return first == '{'
+        except Exception:
+            return False
+
+    if _is_jsonl(path):
+        # JSONL branch — stream line by line
+        print("[sonar] Detected JSONL format — reading lemma/frequency fields.")
+        raw_values = {}
+        n_failed = 0
+        with open(path, 'r', encoding='utf-8') as f:
+            for i, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = _json.loads(line)
+                except _json.JSONDecodeError:
+                    n_failed += 1
+                    continue
+                # Use lemma as lookup key (Stanza outputs lemmas); fall back to text
+                w = str(obj.get('lemma') or obj.get('text') or '').strip().lower()
+                if not w or w in ('nan', 'none', ''):
+                    n_failed += 1
+                    continue
+                freq_raw = obj.get('frequency') or obj.get('freq') or obj.get('count')
+                if freq_raw is None:
+                    n_failed += 1
+                    continue
+                try:
+                    raw_values[w] = float(freq_raw)
+                except (ValueError, TypeError):
+                    n_failed += 1
+
+        total = corpus_size if corpus_size else sum(raw_values.values())
+        if not total or total <= 0:
+            raise ValueError(
+                "Cannot compute corpus size for Zipf conversion. "
+                "Pass --sonar_corpus_size explicitly."
+            )
+        print("[sonar] Converting JSONL counts to Zipf, corpus size "
+              "= {:,.0f} tokens ({}).".format(
+                  total, "from --sonar_corpus_size" if corpus_size
+                  else "sum of counts in file"))
+
+        freq_dict = {}
+        n_floored = 0
+        for w, count in raw_values.items():
+            if count <= 0:
+                freq_dict[w] = ZIPF_FLOOR_FOR_UNSEEN
+                n_floored += 1
+            else:
+                freq_dict[w] = math.log10((count / total) * 1e6) + 3
+
+        print("[sonar] {:,} entries loaded ({:,} floored to Zipf={}, "
+              "{:,} skipped).".format(
+                  len(freq_dict), n_floored, ZIPF_FLOOR_FOR_UNSEEN, n_failed))
+        if freq_dict:
+            vals = list(freq_dict.values())
+            print("[sonar] Zipf range: min={:.3f}, median={:.3f}, max={:.3f}".format(
+                min(vals), sorted(vals)[len(vals)//2], max(vals)))
+        return freq_dict
+
+    # ── Delimited table branch (CSV/TSV) ────────────────────────────────────
     df = _parse_delimited_table(path, 'sonar')
 
     if word_col is None:
@@ -273,8 +703,6 @@ def load_sonar(path, word_col=None, freq_col=None, corpus_size=None):
                 is_zipf = True
                 print("[sonar] Using '{}' as a ready-made Zipf column.".format(c))
                 break
-    else:
-        is_zipf = freq_col.lower().startswith('zipf')
 
     if freq_col is None:
         for c in ('freq', 'frequency', 'Frequency', 'FREQ', 'count', 'Count',
@@ -287,12 +715,8 @@ def load_sonar(path, word_col=None, freq_col=None, corpus_size=None):
     if freq_col is None:
         raise ValueError(
             "Cannot detect frequency column. Columns: {}. "
-            "Use --sonar_freq_col to specify which column to use.".format(
-                list(df.columns)
-            )
-        )
+            "Use --sonar_freq_col.".format(list(df.columns)))
 
-    # Parse raw values first (handles Dutch decimal commas and common NA markers)
     raw_values = {}
     n_failed = 0
     for _, row in df.iterrows():
@@ -311,87 +735,195 @@ def load_sonar(path, word_col=None, freq_col=None, corpus_size=None):
     if is_zipf:
         freq_dict = raw_values
     else:
-        # Raw counts -> Zipf. corpus_size defaults to the sum of counts in
-        # this file (assumes the file covers the whole reference corpus).
         total = corpus_size if corpus_size else sum(raw_values.values())
         if not total or total <= 0:
             raise ValueError(
-                "Cannot compute corpus size for Zipf conversion (sum of "
-                "counts is zero). Pass --sonar_corpus_size explicitly."
-            )
+                "Cannot compute corpus size for Zipf conversion. "
+                "Pass --sonar_corpus_size explicitly.")
         print("[sonar] Converting raw counts to Zipf using corpus size "
               "= {:,.0f} tokens ({}).".format(
                   total, "from --sonar_corpus_size" if corpus_size
                   else "sum of counts in file"))
         freq_dict = {}
+        n_floored = 0
         for w, count in raw_values.items():
             if count <= 0:
-                continue
-            per_million = (count / total) * 1e6
-            freq_dict[w] = math.log10(per_million) + 3
+                freq_dict[w] = ZIPF_FLOOR_FOR_UNSEEN
+                n_floored += 1
+            else:
+                freq_dict[w] = math.log10((count / total) * 1e6) + 3
 
-    print("[sonar] {:,} entries loaded (skipped {:,} unparseable values).".format(
-        len(freq_dict), n_failed
-    ))
+    print("[sonar] {:,} entries loaded (skipped {:,} unparseable).".format(
+        len(freq_dict), n_failed))
     print("[sonar] Word col: '{}', frequency col: '{}'".format(word_col, freq_col))
-
     if freq_dict:
         vals = list(freq_dict.values())
-        print("[sonar] Zipf value range: min={:.3f}, median={:.3f}, max={:.3f}".format(
-            min(vals), sorted(vals)[len(vals)//2], max(vals),
-        ))
-
+        print("[sonar] Zipf range: min={:.3f}, median={:.3f}, max={:.3f}".format(
+            min(vals), sorted(vals)[len(vals)//2], max(vals)))
     if len(freq_dict) == 0:
-        print("[sonar] WARNING: freq_dict is empty — lexical sophistication will be NaN.")
-        print("[sonar] Check that word_col and freq_col point to the correct columns.")
-
+        print("[sonar] WARNING: freq_dict is empty.")
     return freq_dict
 
 
-def load_focal_words(wordlist_path, relpct_threshold, categories_path=None):
+
+
+# ---------------------------------------------------------------------------
+# 3.  FOCAL WORD LIST LOADER
+# ---------------------------------------------------------------------------
+
+def load_focal_words(wordlist_path, n_seeds=None, categories_path=None,
+                      category_pool_n=CATEGORY_POOL_N):
     """
-    Load Juzek (2026) word list and build focal word lookup structures.
+    Load a Juzek (2026)-style LPR word list (las_word_{lang}.csv, as produced
+    by the same pipeline diachronic_opm.py reads) and build top-N AI-seed /
+    near-zero-LPR baseline lookup structures, plus the semantic-category
+    lookup, following the paper's Sec. 3.4-3.6 methodology:
+
+      - AI seeds: the top N content words (NOUN/VERB/ADJ/ADV) ranked by
+        lpr_MH_guarded descending, restricted to lpr_guard_ok == 1 (the
+        paper's count guard, c_M(w) >= 20 — sub-threshold items are already
+        zeroed out in lpr_MH_guarded upstream, lpr_guard_ok flags whether an
+        item passed). One seed set is built per N in `n_seeds`.
+      - Baseline seeds: N content words with the SMALLEST |lpr_MH_guarded|
+        (i.e. "near-zero LPR" — model and human prevalence as similar as
+        possible), UPOS-matched to that N's AI-seed UPOS distribution, drawn
+        from the same guarded pool, excluding the AI seeds themselves. This
+        mirrors diachronic_opm.py's load_seeds_for_language(), but matches on
+        |LPR| (as Sec. 3.5/5 of the paper explicitly does: "the headline
+        baseline selected items with |LPR| ~ 0") rather than that script's
+        |LAS| tie-break.
+      - Categories: validated against the top-`category_pool_n` AI pool
+        specifically (paper default 200, Sec. 3.6/4.2), independent of which
+        N(s) were requested above — a category lemma only counts if it
+        actually appears in this corpus's own top-200 AI-overused list, not
+        merely because it's in the built-in/--categories candidate set.
+
+    Required columns in wordlist_path: key, lemma, upos, lpr_MH_guarded,
+    lpr_guard_ok. (Older las_word CSVs using Delta_MH/relpct_MH columns are
+    NOT compatible with this schema — that was a column-naming mismatch in
+    an earlier version of this script that never matched the real LPR
+    pipeline output; see the CLI --help / module docstring for detail.)
+
+    Returns (focal_lemmas, baseline_lemmas, category_lemmas):
+      focal_lemmas / baseline_lemmas: {N: {lemma: [{key, upos, weight}, ...]}}
+      category_lemmas: {category_name: set(lemma)}
     """
+    if n_seeds is None:
+        n_seeds = DEFAULT_N_SEEDS
+
     df = pd.read_csv(wordlist_path)
-    focal_df = df[
-        df['upos'].isin({'VERB', 'NOUN', 'ADJ', 'ADV'}) &
-        (df['Delta_MH'] > 0) &
-        (df['relpct_MH'] > relpct_threshold)
-    ].copy()
 
-    focal_lemmas = defaultdict(list)
-    for _, row in focal_df.iterrows():
-        focal_lemmas[str(row['lemma']).lower()].append({
-            'key':    row['key'],
-            'upos':   row['upos'],
-            'weight': float(row['relpct_MH']),
-            'delta':  float(row['Delta_MH']),
-        })
+    base_required = {'key', 'lemma', 'upos'}
+    missing_base = base_required - set(df.columns)
+    if missing_base:
+        raise ValueError(
+            "Wordlist file '{}' is missing required column(s): {}.\n"
+            "Columns found: {}.".format(
+                wordlist_path, sorted(missing_base), list(df.columns)
+            )
+        )
 
-    # Category mapping
+    if {'lpr_MH_guarded', 'lpr_guard_ok'}.issubset(df.columns):
+        pass  # already in the pre-guarded form
+    elif {'LAS', 'c_M'}.issubset(df.columns):
+        # Real-world las_word_{lang}.csv schema: no pre-guarded LPR columns,
+        # but LAS (the AI-association ranking score diachronic_opm.py
+        # already ranks/abs()-matches on) and c_M (the model-side count) are
+        # present. Derive the guard exactly as Juzek (2026) Sec. 3.4 defines
+        # it (c_M(w) >= 20; sub-threshold items get LPR=0).
+        df['lpr_guard_ok'] = (df['c_M'] >= 20).astype(int)
+        df['lpr_MH_guarded'] = df['LAS'].astype(float).where(
+            df['lpr_guard_ok'] == 1, 0.0
+        )
+    else:
+        raise ValueError(
+            "Wordlist file '{}' has neither (lpr_MH_guarded, lpr_guard_ok) "
+            "nor (LAS, c_M) columns, so the AI-association ranking can't be "
+            "derived. Columns found: {}.".format(
+                wordlist_path, list(df.columns)
+            )
+        )
+
+    # Guarded content-word pool: passed the count guard, content UPOS only.
+    pool = df[(df['lpr_guard_ok'] == 1) & df['upos'].isin(CONTENT_POS)].copy()
+    pool['lpr_MH_guarded'] = pool['lpr_MH_guarded'].astype(float)
+    pool['abs_lpr'] = pool['lpr_MH_guarded'].abs()
+
+    def _select_baseline(ai_seeds, exclude_keys):
+        """UPOS-matched, smallest |LPR|, excluding the AI seeds themselves."""
+        upos_counts = Counter(ai_seeds['upos'])
+        candidates = pool[~pool['key'].isin(exclude_keys)].sort_values('abs_lpr')
+        parts = []
+        for upos, count in upos_counts.items():
+            parts.append(candidates[candidates['upos'] == upos].head(count))
+        if not parts:
+            return pool.iloc[0:0]
+        return pd.concat(parts).reset_index(drop=True)
+
+    def _to_lemma_dict(seed_df):
+        out = defaultdict(list)
+        for _, row in seed_df.iterrows():
+            out[str(row['lemma']).lower()].append({
+                'key':    row['key'],
+                'upos':   row['upos'],
+                'weight': float(row['lpr_MH_guarded']),
+            })
+        return dict(out)
+
+    focal_lemmas = {}
+    baseline_lemmas = {}
+    for n in n_seeds:
+        ai_seeds = pool.sort_values('lpr_MH_guarded', ascending=False).head(n)
+        bl_seeds = _select_baseline(ai_seeds, set(ai_seeds['key']))
+        focal_lemmas[n] = _to_lemma_dict(ai_seeds)
+        baseline_lemmas[n] = _to_lemma_dict(bl_seeds)
+        print("[focal] top-{}: {} AI-seed lemmas, {} baseline lemmas "
+              "(UPOS-matched, |LPR| ~ 0).".format(
+                  n, len(focal_lemmas[n]), len(baseline_lemmas[n])
+              ))
+
+    # Category pool: top-`category_pool_n` AI seeds, independent of n_seeds.
+    category_ai_pool = pool.sort_values(
+        'lpr_MH_guarded', ascending=False
+    ).head(category_pool_n)
+    category_pool_lemmas = set(category_ai_pool['lemma'].str.lower())
+
     if categories_path:
         cat_df = pd.read_csv(categories_path)
         raw_cats = defaultdict(set)
         for _, row in cat_df.iterrows():
             raw_cats[row['category']].add(str(row['lemma']).strip().lower())
-        category_lemmas = {
-            cat: lemmas & set(focal_lemmas.keys())
-            for cat, lemmas in raw_cats.items()
-        }
         print("[focal] External category mapping loaded.")
     else:
-        category_lemmas = {
-            cat: lemmas & set(focal_lemmas.keys())
-            for cat, lemmas in BUILTIN_FOCAL_CATEGORIES.items()
-        }
+        raw_cats = BUILTIN_FOCAL_CATEGORIES
 
-    print("[focal] {:,} focal word entries "
-          "(relpct_MH > {})".format(len(focal_df), relpct_threshold))
+    category_lemmas = {
+        cat: lemmas & category_pool_lemmas
+        for cat, lemmas in raw_cats.items()
+    }
+
+    print("[focal] Categories validated against top-{} AI pool:".format(
+        category_pool_n
+    ))
     for cat, lemmas in category_lemmas.items():
-        print("[focal]   {}: {} lemmas".format(cat, len(lemmas)))
+        if not lemmas:
+            print("[focal]   {}: 0 lemmas matched — none of the candidate "
+                  "words for this category appear in this corpus's own "
+                  "top-{} AI-overused list. Check --categories or revisit "
+                  "the built-in list for this language.".format(
+                      cat, category_pool_n
+                  ))
+        else:
+            print("[focal]   {}: {} lemmas matched: {}".format(
+                cat, len(lemmas), sorted(lemmas)
+            ))
 
-    return dict(focal_lemmas), category_lemmas
+    return focal_lemmas, baseline_lemmas, category_lemmas
 
+
+# ---------------------------------------------------------------------------
+# 4.  METRIC COMPUTATION
+# ---------------------------------------------------------------------------
 
 def compute_all_metrics(
     doc_or_pseudo,
@@ -400,6 +932,7 @@ def compute_all_metrics(
     low_thresh,
     high_thresh,
     focal_lemmas,
+    baseline_lemmas,
     category_lemmas,
     article,
     text_scope,
@@ -418,19 +951,19 @@ def compute_all_metrics(
     }
 
     if doc_or_pseudo is None:
-        m = empty_metrics(category_lemmas)
+        m = empty_metrics(focal_lemmas, category_lemmas)
         m.update(base)
         return m
 
     if provides_syntax:
         m = compute_stanza_metrics(
             doc_or_pseudo, freq_dict, low_thresh, high_thresh,
-            focal_lemmas, category_lemmas
+            focal_lemmas, baseline_lemmas, category_lemmas
         )
     else:
         m = compute_simplemma_metrics(
             doc_or_pseudo, freq_dict, low_thresh, high_thresh,
-            focal_lemmas, category_lemmas
+            focal_lemmas, baseline_lemmas, category_lemmas
         )
 
     m.update(base)
@@ -438,13 +971,13 @@ def compute_all_metrics(
 
 
 def compute_stanza_metrics(doc, freq_dict, low_thresh, high_thresh,
-                            focal_lemmas, category_lemmas):
+                            focal_lemmas, baseline_lemmas, category_lemmas):
     all_words = [w for sent in doc.sentences for w in sent.words]
     total_words = len(all_words)
     total_sentences = len(doc.sentences)
 
     if total_words == 0:
-        return empty_metrics(category_lemmas)
+        return empty_metrics(focal_lemmas, category_lemmas)
 
     # Content words for MTLD and lexical sophistication
     content_words = [
@@ -467,8 +1000,9 @@ def compute_stanza_metrics(doc, freq_dict, low_thresh, high_thresh,
     # --- Syntax ---
     syn = _syntax_stanza(doc, all_words, total_words, total_sentences)
 
-    # --- Focal words ---
-    foc = _focal_words_stanza(all_words, total_words, focal_lemmas, category_lemmas)
+    # --- Focal words (top-N AI seeds + matched baseline + categories) ---
+    foc = _focal_words_stanza(all_words, total_words, focal_lemmas,
+                               baseline_lemmas, category_lemmas)
 
     result = {
         'total_words':     total_words,
@@ -483,28 +1017,30 @@ def compute_stanza_metrics(doc, freq_dict, low_thresh, high_thresh,
 
 
 def compute_simplemma_metrics(pseudo, freq_dict, low_thresh, high_thresh,
-                               focal_lemmas, category_lemmas):
+                               focal_lemmas, baseline_lemmas, category_lemmas):
     tokens  = pseudo.tokens
     lemmas  = pseudo.lemmas
     total_words = len(tokens)
 
     if total_words == 0:
-        return empty_metrics(category_lemmas)
+        return empty_metrics(focal_lemmas, category_lemmas)
 
     # MTLD on all lemmas (no POS filter available)
     mtld = _compute_mtld_from_lemmas(lemmas)
 
-    # Lexical sophistication — lookup by surface form (no POS filter)
+    # Lexical sophistication — lookup by surface form (no lemma available)
+    # Same floor logic as _lex_sophistication(): OOV tokens count as
+    # low-frequency for prop_low_freq but are excluded from mean_zipf.
     low_c = high_c = 0
     zipf_scores = []
     for tok in tokens:
+        z = freq_dict.get(tok, ZIPF_FLOOR_FOR_UNSEEN)
+        if z < low_thresh:
+            low_c += 1
+        if z >= high_thresh:
+            high_c += 1
         if tok in freq_dict:
-            z = freq_dict[tok]
             zipf_scores.append(z)
-            if z < low_thresh:
-                low_c += 1
-            if z >= high_thresh:
-                high_c += 1
     n = total_words
     lex = {
         'prop_low_freq':  round(low_c / n, 4) if n else None,
@@ -532,7 +1068,7 @@ def compute_simplemma_metrics(pseudo, freq_dict, low_thresh, high_thresh,
 
     # Focal words — lemma-only matching (no UPOS filter)
     foc = _focal_words_simplemma(
-        lemmas, total_words, focal_lemmas, category_lemmas
+        lemmas, total_words, focal_lemmas, baseline_lemmas, category_lemmas
     )
 
     result = {
@@ -547,9 +1083,14 @@ def compute_simplemma_metrics(pseudo, freq_dict, low_thresh, high_thresh,
     return result
 
 
+# ---------------------------------------------------------------------------
+# 5.  COMPONENT FUNCTIONS
+# ---------------------------------------------------------------------------
+
 def _compute_mtld_from_lemmas(lemma_list):
     """
     Compute MTLD from a list of lemmas (content words only).
+    Returns None if fewer than MTLD_MIN_CONTENT_WORDS lemmas.
     """
     if not HAS_LEXRICH or len(lemma_list) < MTLD_MIN_CONTENT_WORDS:
         return None
@@ -564,6 +1105,20 @@ def _compute_mtld_from_lemmas(lemma_list):
 
 def _lex_sophistication(content_words, freq_dict, low_thresh, high_thresh,
                          use_lemma=True):
+    """
+    Compute prop_low_freq, prop_high_freq, mean_zipf over content words.
+
+    Lookup key: w.lemma.lower() (Stanza lemma, citation form) when
+    use_lemma=True; w.text.lower() (surface form) otherwise.
+
+    Words not found in freq_dict are assigned ZIPF_FLOOR_FOR_UNSEEN (=1.0)
+    so they count as low-frequency for prop_low_freq — they are genuinely
+    rare from the model's perspective — but are EXCLUDED from mean_zipf to
+    avoid the floor value biasing the central tendency estimate. This is the
+    conservative choice: prop_low_freq may be slightly inflated by genuine
+    OOV words (proper nouns, neologisms, technical terms), but mean_zipf
+    reflects only words with real frequency evidence.
+    """
     if not freq_dict or not content_words:
         return {'prop_low_freq': None, 'prop_high_freq': None, 'mean_zipf': None}
 
@@ -573,13 +1128,15 @@ def _lex_sophistication(content_words, freq_dict, low_thresh, high_thresh,
 
     for w in content_words:
         key = (w.lemma.lower() if use_lemma else w.text.lower())
+        z = freq_dict.get(key, ZIPF_FLOOR_FOR_UNSEEN)
+        # prop_low/high: every content word contributes (OOV = ZIPF_FLOOR)
+        if z < low_thresh:
+            low_c += 1
+        if z >= high_thresh:
+            high_c += 1
+        # mean_zipf: only words with real frequency evidence (not OOV floor)
         if key in freq_dict:
-            z = freq_dict[key]
             zipf_scores.append(z)
-            if z < low_thresh:
-                low_c += 1
-            if z >= high_thresh:
-                high_c += 1
 
     return {
         'prop_low_freq':  round(low_c / n, 4),
@@ -673,71 +1230,136 @@ def _max_dep_depth(words):
     return max_depth
 
 
-def _focal_words_stanza(all_words, total_words, focal_lemmas, category_lemmas):
-    """Focal word matching using lemma+UPOS — Juzek (2026) protocol."""
-    if not focal_lemmas or total_words == 0:
-        return _empty_focal(category_lemmas)
+def _focal_words_stanza(all_words, total_words, focal_lemmas, baseline_lemmas,
+                         category_lemmas):
+    """
+    Focal word matching using lemma+UPOS, following Juzek (2026)'s top-N
+    AI-overused-word / near-zero-LPR-baseline design (Sec. 3.4-3.6).
 
-    focal_count = 0
-    weighted_sum = 0.0
+    Produces, for each N in focal_lemmas/baseline_lemmas (default 20/50/200):
+      llm_style_word_ratio_top{N}       per-1000-words rate, AI seeds
+      llm_style_word_count_top{N}       raw count, AI seeds (for chi-square
+                                         reconstruction downstream)
+      weighted_llm_ratio_top{N}_per1k   per-1000-words rate weighted by LPR
+      baseline_word_ratio_top{N}        per-1000-words rate, baseline seeds
+      baseline_word_count_top{N}        raw count, baseline seeds
+      baseline_weighted_ratio_top{N}_per1k
+
+    plus one {category}_freq_per1k per semantic category (care_rigour,
+    emphasize, importance by default — drawn from the top-200 AI pool
+    independent of N; see load_focal_words()).
+    """
+    ns = sorted(focal_lemmas.keys())
+    has_data = (
+        any(len(focal_lemmas.get(n, {})) > 0 for n in ns) or
+        any(len(baseline_lemmas.get(n, {})) > 0 for n in ns) or
+        any(len(lemmas) > 0 for lemmas in category_lemmas.values())
+    )
+    if total_words == 0 or not ns or not has_data:
+        return _empty_focal(focal_lemmas, category_lemmas)
+
+    focal_counts      = {n: 0 for n in ns}
+    focal_weighted     = {n: 0.0 for n in ns}
+    baseline_counts    = {n: 0 for n in ns}
+    baseline_weighted  = {n: 0.0 for n in ns}
     cat_counts = {cat: 0 for cat in category_lemmas}
 
     for w in all_words:
         lemma = w.lemma.lower() if w.lemma else ''
-        if lemma not in focal_lemmas:
+        if not lemma:
             continue
-        entries = focal_lemmas[lemma]
-        # Exact lemma+UPOS match
-        matching = [e for e in entries if e['upos'] == w.upos]
-        if not matching:
-            continue
-        best = max(matching, key=lambda e: e['weight'])
-        focal_count += 1
-        weighted_sum += best['weight']
+
+        for n in ns:
+            entries = focal_lemmas[n].get(lemma)
+            if entries:
+                matching = [e for e in entries if e['upos'] == w.upos]
+                if matching:
+                    best = max(matching, key=lambda e: e['weight'])
+                    focal_counts[n] += 1
+                    focal_weighted[n] += best['weight']
+
+            bl_entries = baseline_lemmas[n].get(lemma)
+            if bl_entries:
+                bl_matching = [e for e in bl_entries if e['upos'] == w.upos]
+                if bl_matching:
+                    bl_best = max(bl_matching, key=lambda e: e['weight'])
+                    baseline_counts[n] += 1
+                    baseline_weighted[n] += abs(bl_best['weight'])
+
         for cat, cat_lemmas in category_lemmas.items():
             if lemma in cat_lemmas:
                 cat_counts[cat] += 1
                 break
 
     per1k = 1000.0 / total_words
-    result = {
-        'llm_style_word_ratio': round(focal_count * per1k, 4),
-        'weighted_llm_ratio':   round(weighted_sum / total_words, 4),
-    }
+    result = {}
+    for n in ns:
+        result['llm_style_word_ratio_top{}'.format(n)] = round(focal_counts[n] * per1k, 4)
+        result['llm_style_word_count_top{}'.format(n)] = focal_counts[n]
+        result['weighted_llm_ratio_top{}_per1k'.format(n)] = round(focal_weighted[n] * per1k, 4)
+        result['baseline_word_ratio_top{}'.format(n)] = round(baseline_counts[n] * per1k, 4)
+        result['baseline_word_count_top{}'.format(n)] = baseline_counts[n]
+        result['baseline_weighted_ratio_top{}_per1k'.format(n)] = round(baseline_weighted[n] * per1k, 4)
     for cat in category_lemmas:
         result['{}_freq_per1k'.format(cat)] = round(cat_counts[cat] * per1k, 4)
     return result
 
 
-def _focal_words_simplemma(lemmas, total_words, focal_lemmas, category_lemmas):
-    """Focal word matching on lemmas only (simplemma fallback)."""
-    if not focal_lemmas or total_words == 0:
-        return _empty_focal(category_lemmas)
+def _focal_words_simplemma(lemmas, total_words, focal_lemmas, baseline_lemmas,
+                            category_lemmas):
+    """Same as _focal_words_stanza but lemma-only matching (no UPOS available
+    in the simplemma fallback path)."""
+    ns = sorted(focal_lemmas.keys())
+    has_data = (
+        any(len(focal_lemmas.get(n, {})) > 0 for n in ns) or
+        any(len(baseline_lemmas.get(n, {})) > 0 for n in ns) or
+        any(len(cl) > 0 for cl in category_lemmas.values())
+    )
+    if total_words == 0 or not ns or not has_data:
+        return _empty_focal(focal_lemmas, category_lemmas)
 
-    focal_count = 0
-    weighted_sum = 0.0
+    focal_counts      = {n: 0 for n in ns}
+    focal_weighted     = {n: 0.0 for n in ns}
+    baseline_counts    = {n: 0 for n in ns}
+    baseline_weighted  = {n: 0.0 for n in ns}
     cat_counts = {cat: 0 for cat in category_lemmas}
 
     for lemma in lemmas:
-        if lemma not in focal_lemmas:
-            continue
-        best = max(focal_lemmas[lemma], key=lambda e: e['weight'])
-        focal_count += 1
-        weighted_sum += best['weight']
+        for n in ns:
+            entries = focal_lemmas[n].get(lemma)
+            if entries:
+                best = max(entries, key=lambda e: e['weight'])
+                focal_counts[n] += 1
+                focal_weighted[n] += best['weight']
+
+            bl_entries = baseline_lemmas[n].get(lemma)
+            if bl_entries:
+                bl_best = max(bl_entries, key=lambda e: e['weight'])
+                baseline_counts[n] += 1
+                baseline_weighted[n] += abs(bl_best['weight'])
+
         for cat, cat_lemmas in category_lemmas.items():
             if lemma in cat_lemmas:
                 cat_counts[cat] += 1
                 break
 
     per1k = 1000.0 / total_words
-    result = {
-        'llm_style_word_ratio': round(focal_count * per1k, 4),
-        'weighted_llm_ratio':   round(weighted_sum / total_words, 4),
-    }
+    result = {}
+    for n in ns:
+        result['llm_style_word_ratio_top{}'.format(n)] = round(focal_counts[n] * per1k, 4)
+        result['llm_style_word_count_top{}'.format(n)] = focal_counts[n]
+        result['weighted_llm_ratio_top{}_per1k'.format(n)] = round(focal_weighted[n] * per1k, 4)
+        result['baseline_word_ratio_top{}'.format(n)] = round(baseline_counts[n] * per1k, 4)
+        result['baseline_word_count_top{}'.format(n)] = baseline_counts[n]
+        result['baseline_weighted_ratio_top{}_per1k'.format(n)] = round(baseline_weighted[n] * per1k, 4)
     for cat in category_lemmas:
         result['{}_freq_per1k'.format(cat)] = round(cat_counts[cat] * per1k, 4)
     return result
 
+
+# ---------------------------------------------------------------------------
+# 6.  HELPERS
+# ---------------------------------------------------------------------------
 
 def _safe_mean(values):
     if not values:
@@ -772,17 +1394,22 @@ def _empty_syntax():
     }
 
 
-def _empty_focal(category_lemmas):
-    result = {
-        'llm_style_word_ratio': None,
-        'weighted_llm_ratio':   None,
-    }
+def _empty_focal(focal_lemmas, category_lemmas):
+    ns = sorted(focal_lemmas.keys()) if focal_lemmas else DEFAULT_N_SEEDS
+    result = {}
+    for n in ns:
+        result['llm_style_word_ratio_top{}'.format(n)] = None
+        result['llm_style_word_count_top{}'.format(n)] = None
+        result['weighted_llm_ratio_top{}_per1k'.format(n)] = None
+        result['baseline_word_ratio_top{}'.format(n)] = None
+        result['baseline_word_count_top{}'.format(n)] = None
+        result['baseline_weighted_ratio_top{}_per1k'.format(n)] = None
     for cat in category_lemmas:
         result['{}_freq_per1k'.format(cat)] = None
     return result
 
 
-def empty_metrics(category_lemmas):
+def empty_metrics(focal_lemmas, category_lemmas):
     result = {
         'total_words':     0,
         'total_sentences': 0,
@@ -794,7 +1421,7 @@ def empty_metrics(category_lemmas):
     for col in FUNCTION_WORD_POS.values():
         result[col] = None
     result.update(_empty_syntax())
-    result.update(_empty_focal(category_lemmas))
+    result.update(_empty_focal(focal_lemmas, category_lemmas))
     return result
 
 
@@ -853,6 +1480,10 @@ def write_checkpoint(output_path, rows, fieldnames):
         writer.writerows(rows)
 
 
+# ---------------------------------------------------------------------------
+# 8.  MAIN PROCESSING LOOP
+# ---------------------------------------------------------------------------
+
 def load_parsed_jsonl(path, max_articles=None):
     """
     Load pre-parsed articles from a stanza_parse.py JSONL output file.
@@ -910,7 +1541,8 @@ def process_articles(
     parsed_jsonl_path=None,
     wordlist_path=None,
     categories_path=None,
-    relpct_threshold=500,
+    n_seeds=None,
+    category_pool_n=CATEGORY_POOL_N,
     freq_source=None,
     subtlex_path=None,
     subtlex_word_col=None,
@@ -963,16 +1595,22 @@ def process_articles(
         print("[freq] Pass --freq_source subtlex --subtlex PATH, or "
               "--freq_source sonar --sonar PATH, to enable them.")
 
-    # Load focal word list
+    # Load focal word list: top-N AI-overused seeds + matched near-zero-LPR
+    # baseline seeds (Juzek 2026 Sec. 3.4-3.5), plus the three semantic
+    # categories validated against the top-200 AI pool (Sec. 3.6).
     focal_lemmas = {}
+    baseline_lemmas = {}
     category_lemmas = {}
     if wordlist_path:
-        focal_lemmas, category_lemmas = load_focal_words(
-            wordlist_path, relpct_threshold, categories_path
+        focal_lemmas, baseline_lemmas, category_lemmas = load_focal_words(
+            wordlist_path, n_seeds, categories_path, category_pool_n
         )
     else:
         print("[focal] No wordlist provided — focal word metrics will be NaN.")
-        # Use empty category set so output columns are consistent
+        # Use empty N/category sets so output columns are still consistent
+        ns = n_seeds if n_seeds else DEFAULT_N_SEEDS
+        focal_lemmas = {n: {} for n in ns}
+        baseline_lemmas = {n: {} for n in ns}
         category_lemmas = {cat: set() for cat in BUILTIN_FOCAL_CATEGORIES}
 
     # Load articles or pre-parsed records
@@ -1020,7 +1658,7 @@ def process_articles(
         return results
 
     # Determine output fieldnames from first empty metrics call
-    sample_metrics = empty_metrics(category_lemmas)
+    sample_metrics = empty_metrics(focal_lemmas, category_lemmas)
     sample_row = {
         'title': '', 'source': '', 'date': '', 'author': '',
         'section': '', 'predicted_topic': '', 'char_count': 0,
@@ -1058,6 +1696,7 @@ def process_articles(
                 low_freq_threshold,
                 high_freq_threshold,
                 focal_lemmas,
+                baseline_lemmas,
                 category_lemmas,
                 article,
                 text_scope,
@@ -1095,12 +1734,26 @@ def process_articles(
         len(pending), elapsed_total, len(pending)/elapsed_total if elapsed_total > 0 else 0
     ))
 
-    _print_summary(results, category_lemmas)
+    _print_summary(results, focal_lemmas, category_lemmas)
     return results
 
 
-def _print_summary(results, category_lemmas):
+# ---------------------------------------------------------------------------
+# 9.  SUMMARY
+# ---------------------------------------------------------------------------
+
+def _print_summary(results, focal_lemmas, category_lemmas):
     df = pd.DataFrame(results)
+
+    ns = sorted(focal_lemmas.keys()) if focal_lemmas else DEFAULT_N_SEEDS
+    focal_cols = []
+    for n in ns:
+        focal_cols += [
+            'llm_style_word_ratio_top{}'.format(n),
+            'weighted_llm_ratio_top{}_per1k'.format(n),
+            'baseline_word_ratio_top{}'.format(n),
+            'baseline_weighted_ratio_top{}_per1k'.format(n),
+        ]
 
     # Coerce numeric columns
     numeric_cols = [
@@ -1108,8 +1761,7 @@ def _print_summary(results, category_lemmas):
         'mtld', 'prop_low_freq', 'prop_high_freq', 'mean_zipf',
         'mean_sent_len', 'cv_sent_len', 'mean_dep_depth',
         'finite_verbs_per_sent', 'mean_tunit_len', 'nom_rate',
-        'llm_style_word_ratio', 'weighted_llm_ratio',
-    ] + list(FUNCTION_WORD_POS.values()) + [
+    ] + focal_cols + list(FUNCTION_WORD_POS.values()) + [
         '{}_freq_per1k'.format(cat) for cat in category_lemmas
     ]
 
@@ -1128,6 +1780,10 @@ def _print_summary(results, category_lemmas):
     print(sep)
 
 
+# ---------------------------------------------------------------------------
+# 10.  CLI
+# ---------------------------------------------------------------------------
+
 def main():
     p = argparse.ArgumentParser(
         description="Unified stylometric + focal-word metrics for Dutch articles.",
@@ -1142,10 +1798,22 @@ def main():
                         'When provided, Stanza is not loaded.')
     p.add_argument('--output',     default='article_metrics.csv')
     p.add_argument('--wordlist',   default=None,
-                   help='las_word_nl.csv (Juzek 2026). If omitted, focal metrics are NaN.')
+                   help='las_word_{lang}.csv from the Juzek (2026) LPR pipeline '
+                        '(key, lemma, upos, lpr_MH_guarded, lpr_guard_ok columns '
+                        '— the same file diachronic_opm.py reads). If omitted, '
+                        'focal metrics are NaN.')
     p.add_argument('--categories', default=None,
-                   help='Optional CSV with lemma,category columns to override built-in focal categories.')
-    p.add_argument('--relpct_threshold', type=float, default=500)
+                   help='Optional CSV with lemma,category columns to override '
+                        'the built-in care_rigour/emphasize/importance focal '
+                        'categories (Juzek 2026 Sec. 3.6).')
+    p.add_argument('--n_seeds', type=int, nargs='+', default=None,
+                   help="Top-N AI-overused word counts to compute (and their "
+                        "matched near-zero-LPR baselines), per Juzek (2026) "
+                        "Sec. 3.4-3.5. Space-separated; default 20 50 200.")
+    p.add_argument('--category_pool_n', type=int, default=CATEGORY_POOL_N,
+                   help="Size of the top-N AI pool the three semantic "
+                        "categories are validated against, independent of "
+                        "--n_seeds (Sec. 3.6/4.2 use 200). Default 200.")
     p.add_argument('--freq_source', default=None, choices=['subtlex', 'sonar'],
                    help="Which word-frequency source to use for lexical "
                         "sophistication metrics. If omitted, inferred from "
@@ -1202,7 +1870,8 @@ def main():
         output_path=args.output,
         wordlist_path=args.wordlist,
         categories_path=args.categories,
-        relpct_threshold=args.relpct_threshold,
+        n_seeds=args.n_seeds,
+        category_pool_n=args.category_pool_n,
         freq_source=freq_source,
         subtlex_path=args.subtlex,
         subtlex_word_col=args.subtlex_word_col,
