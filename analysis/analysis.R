@@ -44,7 +44,7 @@ library(broom.mixed)   # tidy() for lmer models
 library(jsonlite)      # reading Pangram .jsonl / .json results
 
 # =============================================================================
-# 0.  CONFIGURATION  — edit these paths and settings
+# 0.  CONFIGURATION 
 # =============================================================================
 
 # --- Input files ---
@@ -2992,147 +2992,13 @@ main <- function() {
   if (!is.null(outlet_type_results) && nrow(outlet_type_results) > 0)
     write_csv(outlet_type_results,
               file.path(PLOT_DIR, "outlet_type_coefficients.csv"))
-  # (split_corpus_results is written inside run_split_corpus_analysis()
-  # itself, since it's a self-contained section.)
-
-  # --- Timeline plots: monthly + quarterly x (outlet type / outlet / topic) ---
-  # Covers every fingerprint metric, every focal metric (top-N AI-seed,
-  # matched baseline, and whatever category columns were detected),
-  # composite_fingerprint, and pangram_ai_score (if Pangram data was
-  # attached for at least one outlet) — all through the one generic system
-  # in Section 12. This is the "diachronic analysis, like everything else"
-  # treatment for the three semantic-category metrics too.
-  timeline_metrics <- c(ALL_METRICS, "composite_fingerprint")
-  if ("pangram_ai_score" %in% names(df_composite)) {
-    timeline_metrics <- c(timeline_metrics, "pangram_ai_score")
-  }
-  generate_timeline_plots(df_composite, metrics = timeline_metrics)
-
-  # Figure-3-style yearly % change from pre-intervention baseline mean, for
-  # the three semantic-category metrics specifically (Sec. 3.6 framing,
-  # additional to — not instead of — their generic timeline treatment above).
-  plot_concept_diachronic(df_composite)
-
-  # Visual contrast of the split-corpus pre/post result (Sec. 9b)
-  plot_split_corpus(split_corpus_results)
-
-  # Heatmap of the Welch's t-test results across all other metrics (Sec. 9c)
-  plot_split_corpus_continuous_heatmap(split_corpus_continuous_results)
-
-  # Homogenization (Sec. 9d): within-outlet SD trajectories for key metrics
-  if (!is.null(homog_results$sd_outlet)) {
-    dir.create(file.path(PLOT_DIR, "homogenization"), showWarnings = FALSE)
-    key_hom_metrics <- c("mean_sent_len", "nom_rate", "prop_high_freq",
-                         intersect("composite_fingerprint", names(df_composite)))
-    for (m in key_hom_metrics[key_hom_metrics %in% names(df_composite)]) {
-      plot_homogenization_timeline(
-        homog_results$sd_outlet, m, group_col = "outlet",
-        save_path = file.path(PLOT_DIR, "homogenization",
-                              paste0("sd_by_outlet_", m, ".pdf"))
-      )
-    }
-  }
-
-  # Pangram AI/AI-assisted/human classification mix, monthly + quarterly
-  for (unit in TIME_UNITS) {
-    plot_pangram_fraction_bars(df_composite, unit = unit)
-  }
-
-  # --- Root-level summary plots ---
-  message("\n=== GENERATING SUMMARY PLOTS ===")
-
-  # Composite fingerprint trajectory (headline chart)
-  plot_composite(df_composite)
-
-  # ITS result heatmaps — primary results table
-  plot_results_heatmap(outlet_its$key, term_name = "intervention")
-  plot_results_heatmap(outlet_its$key, term_name = "time_after")
-
-  # Split-corpus pre/post: focal word chi-square (Sec. 9b) visual
-  plot_split_corpus(split_corpus_results)
-
-  # Split-corpus pre/post: all other metrics t-test heatmap (Sec. 9c)
-  plot_split_corpus_continuous_heatmap(split_corpus_continuous_results)
-
-  # Concept diachronic: yearly % change for care/rigour, emphasize, importance
-  plot_concept_diachronic(df_composite)
-
-  # Pangram: AI-assistance score trajectory — free scale + fixed scale versions
-  if (!is.null(pangram_results)) {
-    plot_pangram(pangram_results$agg, fixed_scale = FALSE)
-    plot_pangram(pangram_results$agg, fixed_scale = TRUE)
-  }
-
-  # Pangram: stacked fraction bars (AI / AI-assisted / human) — monthly + quarterly
-  for (unit in TIME_UNITS) {
-    plot_pangram_fraction_bars(df_composite, unit = unit)
-  }
-
-  # Pangram: per-topic trajectory pooled across all outlets
-  plot_pangram_by_topic(df_composite, unit = "quarter")
-
-  # Flagged vs unflagged article comparison (Sec. 9e.2)
-  flagged_comp <- compare_flagged_unflagged(
-    df_composite, metrics = ALL_METRICS
-  )
-  plot_flagged_comparison(flagged_comp)
-
-  # --- Diagnostic plots (plots/diagnostic/) ---
-  message("\n=== GENERATING DIAGNOSTIC PLOTS ===")
-
-  # Key metrics for journalist-level plots: MTLD + smallest available top-N
-  ai_seed_cols <- names(df_journalists)[
-    str_detect(names(df_journalists), "^llm_style_word_ratio_top[0-9]+$")
-  ]
-  journalist_trajectory_metrics <- "mtld"
-  if (length(ai_seed_cols) > 0) {
-    ai_ns <- as.integer(str_extract(ai_seed_cols, "[0-9]+$"))
-    journalist_trajectory_metrics <- c(
-      journalist_trajectory_metrics, ai_seed_cols[which.min(ai_ns)]
-    )
-  }
-
-  # Faceted ITS time-series for key metrics (one per metric, by outlet)
-  its_faceted_metrics <- c(
-    "mean_sent_len", "nom_rate", "prop_high_freq", "freq_pronoun",
-    intersect(paste0("llm_style_word_ratio_top", c(20, 50, 200)),
-              names(agg))
-  )
-  for (m in its_faceted_metrics) {
-    if (m %in% names(agg)) plot_its_faceted(agg, m)
-  }
-
-  # Journalist-level spaghetti plots
-  for (m in journalist_trajectory_metrics) {
-    if (m %in% names(df_journalists))
-      plot_journalist_trajectories(df_journalists, m)
-  }
-
-  # Random slopes from lmer for MTLD
-  if (!is.null(journalist_its$models) && "mtld" %in% names(journalist_its$models)) {
-    plot_random_slopes(journalist_its$models[["mtld"]], "mtld")
-  }
-
-  # Journalist concentration analysis (Sec. 9e.1)
-  conc_metrics <- intersect(c("mean_sent_len", "nom_rate", "mean_dep_depth"),
-                             names(journalist_its$models %||% list()))
-  if (length(conc_metrics) > 0 && !is.null(journalist_its$models)) {
-    concentration_results <- analyze_journalist_concentration(
-      journalist_its$models, metrics = conc_metrics
-    )
-    if (!is.null(concentration_results)) {
-      write_csv(concentration_results,
-                file.path(PLOT_DIR, "journalist_concentration.csv"))
-      message("[concentration] Written journalist_concentration.csv")
-      print(concentration_results)
-    }
-    plot_journalist_concentration(journalist_its$models, metrics = conc_metrics)
-  }
 
   message("\n=== ANALYSIS COMPLETE ===")
-  message("[output] Plots and CSVs saved to: ", PLOT_DIR)
+  message("[output] CSVs saved to: ", PLOT_DIR)
+  message("[plots]  Call plot_* functions interactively from the R console.")
+  message("         Example: plot_results_heatmap(results$outlet_its$key, 'time_after')")
 
-  # Return all results invisibly for interactive exploration
+  # Return all results invisibly for interactive exploration and plotting
   invisible(list(
     df             = df,
     agg            = agg,
