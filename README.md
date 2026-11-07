@@ -15,7 +15,7 @@ Next, we extract all fields (title, author, body_text, etc.) from the plain text
 
 ### Topic Classification and Balancing
 
-Subsequently, we want to balance are data on topic. We perform a topic classification experiment to find an LLM and prompt combination for this task `eventdna_experiment`. 
+Subsequently, we want to balance our data on topic. We perform a topic classification experiment to find an LLM and prompt combination for this task `eventdna_experiment`. 
 The best combination, Qwen-3.5-9B with a fewshot prompt, is used to classify all filtered articles `classify_topics.py`. After balancing the articles on topic `balance_articles.py`, we remove topics with less than 15 articles per month. The amount of articles at each stage of this data pipeline is shown in the table below. Our final corpus consists of 66,295 newspaper articles. 
 
 | Newspaper | Collected | Filtered | Balanced |
